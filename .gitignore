@@ -1,0 +1,21 @@
+# Secret files — never commit
+*.txt
+*.json
+*.env
+
+# Keep prompt files (they're not secrets)
+!prompt_hs.txt
+!prompt_sales_mgmt.txt
+
+# PyInstaller
+dist/
+build/
+*.spec
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Mac
+.DS_Store
