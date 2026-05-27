@@ -1,19 +1,21 @@
 """
 PROJECT: Wordly Sales Intelligence Pipeline
 SCRIPT:  matcher_v1_0.py
-VERSION: 1.0d
-CHANGES: Added Step 6 — Gemini summarization. Generates two outputs per
-         matched transcript: HubSpot summary (prompt_hs.txt) and sales
-         management audit (prompt_sales_mgmt.txt). Results printed and
-         saved as local .txt files for review before any CRM writes.
+VERSION: 2.0
+CHANGES: Multi-salesperson loop. Reads salespeople.csv for name/email/api_key.
+         Runs full pipeline per person — HubSpot meeting pull, Wordly transcript
+         pull, fuzzy match, transcript download, Gemini summarization.
+         Outputs per-person summary files. Slack summary on completion.
+         RUN_MODE controls scope: "single" (one meeting), "day", "week"
 AUTHOR:  Built with Claude
-DATE:    2026-05-07
+DATE:    2026-05-11
 """
 
 import requests
 import json
 import os
 import sys
+import csv
 import time
 from datetime import datetime, timezone, timedelta
 from collections import Counter
@@ -21,26 +23,27 @@ from collections import Counter
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-WORDLY_KEY_FILE    = "Aleksandra_Laszczyk_Mendez_WordlyAPI.txt"
 HS_KEY_FILE        = "HS_Service_key.txt"
-SLACK_WEBHOOK_FILE = "slack_webhook.txt"
 GEMINI_KEY_FILE    = "gemini_api_key.txt"
+SLACK_WEBHOOK_FILE = "slack_webhook.txt"
 PROMPT_HS_FILE     = "prompt_hs.txt"
 PROMPT_MGMT_FILE   = "prompt_sales_mgmt.txt"
+SALESPEOPLE_FILE   = "salespeople.csv"
 
 WORDLY_BASE_URL    = "https://api.wordly.ai"
 HS_BASE_URL        = "https://api.hubapi.com"
 GEMINI_URL         = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
-TARGET_EMAIL       = "aleksandra.laszczyk@wordly.ai"
+# RUN_MODE: "single" = 1 meeting per person, "day" = today, "week" = last 7 days
+RUN_MODE           = "single"
 
-LOOKBACK_DAYS      = 2
+# Matching config
 MATCH_WINDOW_MINS  = 15
 HIGH_THRESHOLD     = 6
 MIN_DURATION_MINS  = 5
+MAX_TO_SUMMARIZE   = 1      # Per person. Increase when off free tier.
 
 OUTPUT_DIR         = "summaries"
-MAX_TO_SUMMARIZE   = 1     # Gemini free tier rate limit guard. Increase when on paid/Vertex.
 
 # ---------------------------------------------------------------------------
 # HELPERS
@@ -63,10 +66,28 @@ def load_key(filename):
 def load_prompt(filename):
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
     if not os.path.exists(path):
-        print(f"  ❌  Prompt file not found: {filename}")
         return None
     with open(path, "r", encoding="utf-8") as f:
         return f.read().strip()
+
+
+def load_salespeople():
+    """Load salespeople from CSV. Returns list of dicts."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), SALESPEOPLE_FILE)
+    if not os.path.exists(path):
+        print(f"  ❌  {SALESPEOPLE_FILE} not found.")
+        return []
+    people = []
+    with open(path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            people.append({
+                "name":          row.get("name", "").strip(),
+                "email":         row.get("email", "").strip().lower(),
+                "wordly_api_key": row.get("wordly_api_key", "").strip()
+            })
+    print(f"  ✅  Loaded {len(people)} salespeople from {SALESPEOPLE_FILE}")
+    return people
 
 
 def section(title):
@@ -113,21 +134,31 @@ def confidence_score(delta_mins):
         return (0, "NONE")
 
 
+def safe_filename(s):
+    return "".join(c if c.isalnum() or c in "._- " else "_" for c in s).strip()
+
+
 CONF_ICON = {"HIGH": "✅", "MEDIUM": "🟡", "LOW": "🟠", "NONE": "❌"}
 
 
-def safe_filename(s):
-    """Strip characters unsafe for filenames."""
-    return "".join(c if c.isalnum() or c in "._- " else "_" for c in s).strip()
+def get_lookback_days():
+    if RUN_MODE == "single":
+        return 2    # Narrow window, pick most recent
+    elif RUN_MODE == "day":
+        return 1
+    elif RUN_MODE == "week":
+        return 7
+    return 2
 
 
 # ---------------------------------------------------------------------------
 # TRANSCRIPT DOWNLOAD
 # ---------------------------------------------------------------------------
 
-def download_transcript(t_id, headers):
+def download_transcript(t_id, wordly_key):
     url = f"{WORDLY_BASE_URL}/transcripts/{t_id}/original?format=txt&speaker_names=true"
     chunks = []
+    headers = {"x-wordly-api-key": wordly_key}
     try:
         with requests.get(url, headers=headers, timeout=30, stream=True) as res:
             if res.status_code != 200:
@@ -141,88 +172,52 @@ def download_transcript(t_id, headers):
         text = "".join(chunks)
         if not text.strip():
             return None, "empty"
-        status = "ok" if text.count("\n") > 2 else "partial"
-        return text, status
+        return text, "ok"
     except Exception as e:
         return None, f"exception: {e}"
 
 
 # ---------------------------------------------------------------------------
-# STEP 1 — RESOLVE OWNER
+# HUBSPOT
 # ---------------------------------------------------------------------------
 
-def resolve_owner(hs_key, target_email):
-    section("STEP 1 — RESOLVE HUBSPOT OWNER")
-    print(f"\n  Looking up: {target_email}")
+def resolve_owner(hs_key, email, all_owners=None):
+    """Find HubSpot owner by email. Pass all_owners list to avoid repeat API calls."""
+    if all_owners:
+        for o in all_owners:
+            if o.get("email", "").lower() == email.lower():
+                return o
+        return None
     headers = {"Authorization": f"Bearer {hs_key}", "Content-Type": "application/json"}
     try:
         res = requests.get(f"{HS_BASE_URL}/crm/v3/owners?limit=100", headers=headers, timeout=10)
         if res.status_code != 200:
-            print(f"  ❌  {res.status_code}")
             return None
         for o in res.json().get("results", []):
-            if o.get("email", "").lower() == target_email.lower():
-                name = f"{o.get('firstName','')} {o.get('lastName','')}".strip()
-                print(f"  ✅  Found: {name} | ownerId={o.get('id')}")
+            if o.get("email", "").lower() == email.lower():
                 return o
-        print(f"  ❌  Not found: {target_email}")
         return None
-    except Exception as e:
-        print(f"  ❌  Exception: {e}")
-        return None
-
-
-
-# ---------------------------------------------------------------------------
-# CONTACT NAME LOOKUP
-# ---------------------------------------------------------------------------
-
-def fetch_meeting_contact(meeting_id, headers):
-    """Fetch the first associated contact name for a meeting. Returns string."""
-    if not meeting_id:
-        return "Unknown"
-    try:
-        # Get contact associations
-        res = requests.get(
-            f"{HS_BASE_URL}/crm/v3/objects/meetings/{meeting_id}/associations/contacts",
-            headers=headers, timeout=10
-        )
-        if res.status_code != 200:
-            return "Unknown"
-        results = res.json().get("results", [])
-        if not results:
-            return "No contact"
-        contact_id = results[0].get("id")
-        # Fetch contact name
-        cr = requests.get(
-            f"{HS_BASE_URL}/crm/v3/objects/contacts/{contact_id}?properties=firstname,lastname,email",
-            headers=headers, timeout=10
-        )
-        if cr.status_code != 200:
-            return "Unknown"
-        props = cr.json().get("properties", {})
-        first = props.get("firstname") or ""
-        last  = props.get("lastname") or ""
-        name  = f"{first} {last}".strip()
-        return name if name else props.get("email", "Unknown")
     except:
-        return "Unknown"
+        return None
 
-# ---------------------------------------------------------------------------
-# STEP 2 — PULL HUBSPOT MEETINGS
-# ---------------------------------------------------------------------------
+
+def fetch_all_owners(hs_key):
+    headers = {"Authorization": f"Bearer {hs_key}", "Content-Type": "application/json"}
+    try:
+        res = requests.get(f"{HS_BASE_URL}/crm/v3/owners?limit=100", headers=headers, timeout=10)
+        if res.status_code == 200:
+            return res.json().get("results", [])
+    except:
+        pass
+    return []
+
 
 def pull_hs_meetings(hs_key, owner_id, lookback_days):
-    section("STEP 2 — HUBSPOT MEETINGS FOR OWNER")
     headers = {"Authorization": f"Bearer {hs_key}", "Content-Type": "application/json"}
-
     now_utc   = datetime.now(timezone.utc)
     since_utc = now_utc - timedelta(days=lookback_days)
     now_ms    = int(now_utc.timestamp() * 1000)
     since_ms  = int(since_utc.timestamp() * 1000)
-
-    print(f"\n  Owner ID : {owner_id}")
-    print(f"  Window   : {since_utc.strftime('%Y-%m-%d %H:%M')} UTC -> {now_utc.strftime('%Y-%m-%d %H:%M')} UTC")
 
     payload = {
         "filterGroups": [{
@@ -234,141 +229,105 @@ def pull_hs_meetings(hs_key, owner_id, lookback_days):
         }],
         "properties": [
             "hs_meeting_title", "hs_meeting_start_time", "hs_meeting_end_time",
-            "hs_meeting_outcome", "hs_attendee_owner_ids", "hubspot_owner_id"
+            "hs_meeting_outcome", "hubspot_owner_id"
         ],
         "sorts": [{"propertyName": "hs_meeting_start_time", "direction": "ASCENDING"}],
         "limit": 50
     }
-
     try:
         res = requests.post(
             f"{HS_BASE_URL}/crm/v3/objects/meetings/search",
             headers=headers, json=payload, timeout=15
         )
         if res.status_code != 200:
-            print(f"  ❌  {res.status_code}: {res.text[:200]}")
+            print(f"    ❌  HS meetings failed: {res.status_code}")
             return []
-
         results = res.json().get("results", [])
-        print(f"\n  ✅  {len(results)} meetings found\n")
-        print(f"  {'#':<4} {'id':<14} {'outcome':<12} {'dur':>5}  {'start_time':<26} title")
-        print(f"  {'-'*4} {'-'*14} {'-'*12} {'-'*5}  {'-'*26} {'-'*35}")
-
         meetings = []
-        for i, m in enumerate(results):
-            props   = m.get("properties", {})
-            start   = props.get("hs_meeting_start_time", "")
-            end     = props.get("hs_meeting_end_time", "")
-            dur     = duration_mins(start, end)
-            outcome = props.get("hs_meeting_outcome") or "—"
-            title   = props.get("hs_meeting_title") or "Untitled"
-            # Fetch associated contact name
-            contact_name = fetch_meeting_contact(m.get("id"), headers)
-
-            print(f"  {i:<4} {m.get('id','?'):<14} {outcome:<12} {dur:>4}m  {start:<26} {title[:32]} | {contact_name}")
+        for m in results:
+            props = m.get("properties", {})
+            start = props.get("hs_meeting_start_time", "")
+            end   = props.get("hs_meeting_end_time", "")
             meetings.append({
-                "hs_id": m.get("id"), "title": title,
-                "start": parse_dt(start), "end": parse_dt(end),
-                "duration": dur, "outcome": outcome, "start_str": start,
-                "contact_name": contact_name
+                "hs_id":    m.get("id"),
+                "title":    props.get("hs_meeting_title") or "Untitled",
+                "start":    parse_dt(start),
+                "end":      parse_dt(end),
+                "duration": duration_mins(start, end),
+                "outcome":  props.get("hs_meeting_outcome") or "—",
+                "start_str": start
             })
         return meetings
     except Exception as e:
-        print(f"  ❌  Exception: {e}")
+        print(f"    ❌  Exception: {e}")
         return []
 
 
 # ---------------------------------------------------------------------------
-# STEP 3 — PULL WORDLY TRANSCRIPTS
+# WORDLY
 # ---------------------------------------------------------------------------
 
-def get_session_state(session_id, headers):
+def get_session_state(session_id, wordly_key):
     try:
         res = requests.get(
             f"{WORDLY_BASE_URL}/sessions/{session_id}",
-            headers=headers, timeout=10
+            headers={"x-wordly-api-key": wordly_key}, timeout=10
         )
         return res.json().get("state", "unknown") if res.status_code == 200 else f"error_{res.status_code}"
     except:
         return "exception"
 
 
-def pull_wordly_transcripts(wordly_key, lookback_days, min_duration):
-    section("STEP 3 — WORDLY TRANSCRIPTS")
-    headers = {"x-wordly-api-key": wordly_key}
-
-    now_utc   = datetime.now(timezone.utc)
+def pull_wordly_transcripts(wordly_key, lookback_days):
+    headers  = {"x-wordly-api-key": wordly_key}
+    now_utc  = datetime.now(timezone.utc)
     since_utc = now_utc - timedelta(days=lookback_days)
-
-    print(f"\n  Window       : {since_utc.strftime('%Y-%m-%d %H:%M')} UTC -> {now_utc.strftime('%Y-%m-%d %H:%M')} UTC")
-    print(f"  Min duration : {min_duration} mins")
 
     try:
         res = requests.get(
             f"{WORDLY_BASE_URL}/transcripts?page=1&limit=50",
             headers=headers, timeout=15
         )
+        if res.status_code == 401:
+            print(f"    ❌  401 Unauthorized — API key rejected or revoked.")
+            return None   # None signals auth failure vs empty list
         if res.status_code != 200:
-            print(f"  ❌  {res.status_code}")
+            print(f"    ❌  Transcript list failed: {res.status_code}")
             return []
 
-        all_t     = res.json().get("transcripts", [])
-        in_window = [
-            t for t in all_t
-            if (parse_dt(t.get("startTime")) or datetime.min.replace(tzinfo=timezone.utc)) >= since_utc
-        ]
-
-        print(f"  Total from API : {len(all_t)}")
-        print(f"  In window      : {len(in_window)}\n")
-        print(f"  {'#':<4} {'sessionId':<12} {'state':<10} {'dur':>5}  {'startTime':<26} {'action':<8} title")
-        print(f"  {'-'*4} {'-'*12} {'-'*10} {'-'*5}  {'-'*26} {'-'*8} {'-'*30}")
-
+        all_t = res.json().get("transcripts", [])
         transcripts = []
-        for i, t in enumerate(in_window):
-            sid   = t.get("sessionId", "?")
-            start = t.get("startTime", "")
-            end   = t.get("endTime", "")
-            dur   = duration_mins(start, end)
-            title = t.get("title", "?")
-            t_id  = t.get("transcriptId")
-            state = get_session_state(sid, headers)
-
+        for t in all_t:
+            start = parse_dt(t.get("startTime"))
+            if not start or start < since_utc:
+                continue
+            sid = t.get("sessionId", "?")
+            dur = duration_mins(t.get("startTime",""), t.get("endTime",""))
+            if 0 <= dur < MIN_DURATION_MINS:
+                continue
+            state = get_session_state(sid, wordly_key)
             if state != "ended":
-                action = "SKIP"
-            elif 0 <= dur < min_duration:
-                action = "SKIP"
-            else:
-                action = "KEEP"
-
-            state_disp = state.upper() if state in ("created","started","ended") else state
-            print(f"  {i:<4} {sid:<12} {state_disp:<10} {dur:>4}m  {start:<26} {action:<8} {title[:30]}")
-
-            if action == "KEEP":
-                transcripts.append({
-                    "transcript_id": t_id, "session_id": sid, "title": title,
-                    "start": parse_dt(start), "end": parse_dt(end),
-                    "duration": dur, "start_str": start
-                })
-
-        print(f"\n  Kept: {len(transcripts)}  |  Skipped: {len(in_window) - len(transcripts)}")
+                continue
+            transcripts.append({
+                "transcript_id": t.get("transcriptId"),
+                "session_id":    sid,
+                "title":         t.get("title", "?"),
+                "start":         start,
+                "end":           parse_dt(t.get("endTime")),
+                "duration":      dur,
+                "start_str":     t.get("startTime","")
+            })
         return transcripts
-
     except Exception as e:
-        print(f"  ❌  Exception: {e}")
+        print(f"    ❌  Exception: {e}")
         return []
 
 
 # ---------------------------------------------------------------------------
-# STEP 4 — ONE-TO-ONE GREEDY MATCH
+# MATCHING
 # ---------------------------------------------------------------------------
 
-def match(transcripts, meetings, window_mins):
-    section("STEP 4 — MATCHING (one-to-one, greedy)")
-    print(f"\n  Match window   : +/- {window_mins} mins")
-    print(f"  HIGH threshold : <= {HIGH_THRESHOLD} mins")
-    print(f"  Transcripts    : {len(transcripts)}")
-    print(f"  HS Meetings    : {len(meetings)}")
-
+def match(transcripts, meetings):
     candidates = []
     for t in transcripts:
         for m in meetings:
@@ -384,203 +343,216 @@ def match(transcripts, meetings, window_mins):
                 })
 
     candidates.sort(key=lambda x: (-x["score"], x["delta_mins"]))
-
-    used_transcripts = set()
-    used_meetings    = set()
-    assigned         = []
-
+    used_t = set()
+    used_m = set()
+    assigned = []
     for c in candidates:
         t_id = c["transcript"]["transcript_id"]
         m_id = c["meeting"]["hs_id"]
-        if t_id not in used_transcripts and m_id not in used_meetings:
+        if t_id not in used_t and m_id not in used_m:
             assigned.append(c)
-            used_transcripts.add(t_id)
-            used_meetings.add(m_id)
+            used_t.add(t_id)
+            used_m.add(m_id)
 
     for t in transcripts:
-        if t["transcript_id"] not in used_transcripts:
+        if t["transcript_id"] not in used_t:
             assigned.append({
                 "transcript": t, "meeting": None,
                 "delta_mins": None, "score": 0, "confidence": "NONE"
             })
 
     assigned.sort(key=lambda x: x["transcript"]["start"] or datetime.min.replace(tzinfo=timezone.utc))
-
-    print(f"\n  {'conf':<8} {'delta':>6}  {'transcript_start':<26} {'meeting_start':<26} titles")
-    print(f"  {'-'*8} {'-'*6}  {'-'*26} {'-'*26} {'-'*50}")
-
-    for r in assigned:
-        t       = r["transcript"]
-        m       = r["meeting"]
-        conf    = r["confidence"]
-        delta   = f"{r['delta_mins']}m" if r["delta_mins"] is not None else "—"
-        t_disp  = t["title"][:25]
-        m_disp  = m["title"][:25] if m else "⚠️  NO MATCH — unlogged call?"
-        m_start = m["start_str"] if m else "—"
-        icon    = CONF_ICON.get(conf, "?")
-        print(f"  {icon} {conf:<6} {delta:>6}  {t['start_str']:<26} {m_start:<26} {t_disp} / {m_disp}")
-
-    counts = Counter(r["confidence"] for r in assigned)
-    print(f"\n  Summary — HIGH: {counts['HIGH']}  MEDIUM: {counts['MEDIUM']}  LOW: {counts['LOW']}  NONE: {counts['NONE']}")
     return assigned
 
 
 # ---------------------------------------------------------------------------
-# STEP 5 — PULL TRANSCRIPT TEXT
+# GEMINI
 # ---------------------------------------------------------------------------
 
-def pull_transcript_texts(matches, wordly_key):
-    section("STEP 5 — TRANSCRIPT TEXT PULL (HIGH + MEDIUM)")
-    headers = {"x-wordly-api-key": wordly_key}
+def gemini_call(prompt_text, gemini_key, retries=2):
+    for attempt in range(retries):
+        try:
+            res = requests.post(
+                f"{GEMINI_URL}?key={gemini_key}",
+                json={"contents": [{"parts": [{"text": prompt_text}]}]},
+                timeout=90
+            )
+            if res.status_code == 200:
+                return res.json()["candidates"][0]["content"]["parts"][0]["text"]
+            return f"ERROR {res.status_code}: {res.text[:200]}"
+        except requests.exceptions.Timeout:
+            if attempt < retries - 1:
+                time.sleep(5)
+                continue
+            return "EXCEPTION: Gemini timed out after retries."
+        except Exception as e:
+            return f"EXCEPTION: {e}"
+    return "EXCEPTION: All retries exhausted."
 
+
+# ---------------------------------------------------------------------------
+# SUMMARIZATION
+# ---------------------------------------------------------------------------
+
+def summarize_match(r, person_name, gemini_key, prompt_hs, prompt_mgmt):
+    t        = r["transcript"]
+    m        = r["meeting"]
+    t_id     = t["transcript_id"]
+    wordly_key = r.get("wordly_key")
+    conf     = r["confidence"]
+
+    # Download transcript text
+    text, status = download_transcript(t_id, wordly_key)
+    if not text:
+        print(f"    ⚠️  Download failed: {status}")
+        return None
+
+    m_title  = m["title"] if m else "Unmatched"
+    m_start  = m["start_str"] if m else t["start_str"]
+    dt       = parse_dt(m_start) or parse_dt(t["start_str"])
+    date_str = dt.strftime("%Y-%m-%d_%H%M") if dt else "unknown"
+    safe_n   = safe_filename(person_name.replace(" ", "_"))
+    base     = f"{safe_n}_{date_str}"
+
+    person_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        OUTPUT_DIR,
+        safe_filename(person_name)
+    )
+    os.makedirs(person_dir, exist_ok=True)
+
+    def save(suffix, body, header):
+        path = os.path.join(person_dir, f"{base}_{suffix}.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(header + "\n" + "="*60 + "\n\n" + body)
+
+    save("TRANSCRIPT", text, f"RAW TRANSCRIPT — {person_name} — {date_str}")
+
+    # HubSpot summary
+    print(f"    Generating HubSpot summary...", end=" ", flush=True)
+    hs_summary = gemini_call(
+        f"{prompt_hs}\n\nSalesperson: {person_name}\nMeeting: {m_title}\n\nTRANSCRIPT:\n{text}",
+        gemini_key
+    )
+    print("✅" if not hs_summary.startswith("ERROR") else "❌")
+    save("HS", hs_summary,
+         f"HUBSPOT SUMMARY\nSalesperson: {person_name}\nMeeting: {m_title}\nDate: {m_start}\nHS ID: {m['hs_id'] if m else 'UNMATCHED'}\nMatch: {conf}")
+    time.sleep(2)
+
+    # Sales audit
+    print(f"    Generating sales audit...", end=" ", flush=True)
+    mgmt_summary = gemini_call(
+        f"{prompt_mgmt}\n\nSalesperson: {person_name}\nMeeting: {m_title}\n\nTRANSCRIPT:\n{text}",
+        gemini_key
+    )
+    print("✅" if not mgmt_summary.startswith("ERROR") else "❌")
+    save("AUDIT", mgmt_summary,
+         f"SALES AUDIT\nSalesperson: {person_name}\nMeeting: {m_title}\nDate: {m_start}\nHS ID: {m['hs_id'] if m else 'UNMATCHED'}\nMatch: {conf}")
+
+    print(f"    Files saved: {safe_filename(person_name)}/{base}_*.txt")
+    return {"hs": hs_summary, "audit": mgmt_summary, "base": base}
+
+
+# ---------------------------------------------------------------------------
+# PER-PERSON PIPELINE
+# ---------------------------------------------------------------------------
+
+def run_person(person, hs_key, gemini_key, slack_url, prompt_hs, prompt_mgmt,
+               all_owners, lookback_days, run_mode):
+    name       = person["name"]
+    email      = person["email"]
+    wordly_key = person["wordly_api_key"]
+
+    section(f"{name} — {email}")
+
+    # Resolve HubSpot owner
+    owner = resolve_owner(hs_key, email, all_owners)
+    if not owner:
+        print(f"  ⚠️  Not found in HubSpot owners — skipping HS matching.")
+        print(f"      Will still pull Wordly transcripts if key is valid.")
+        owner_id = None
+    else:
+        owner_id = owner.get("id")
+        print(f"  ✅  HubSpot owner ID: {owner_id}")
+
+    # Pull HubSpot meetings
+    meetings = []
+    if owner_id:
+        meetings = pull_hs_meetings(hs_key, owner_id, lookback_days)
+        print(f"  HS meetings found: {len(meetings)}")
+    else:
+        print(f"  HS meetings: skipped (no owner)")
+
+    # Pull Wordly transcripts
+    print(f"  Pulling Wordly transcripts (last {lookback_days} days)...")
+    transcripts = pull_wordly_transcripts(wordly_key, lookback_days)
+
+    if transcripts is None:
+        # Auth failure
+        slack_notify(slack_url,
+            f"⚠️ *Wordly API key auth failed* for `{name}` — key may have been rotated. "
+            f"Pipeline skipped for this person.")
+        return {"name": name, "status": "auth_failed", "matched": 0, "summarized": 0}
+
+    print(f"  Wordly transcripts found: {len(transcripts)}")
+
+    if not transcripts:
+        print(f"  No transcripts to process.")
+        return {"name": name, "status": "no_transcripts", "matched": 0, "summarized": 0}
+
+    # Match
+    if meetings:
+        matches = match(transcripts, meetings)
+    else:
+        # No meetings — mark all as NONE but still process
+        matches = [{"transcript": t, "meeting": None,
+                    "delta_mins": None, "score": 0, "confidence": "NONE"}
+                   for t in transcripts]
+
+    counts = Counter(r["confidence"] for r in matches)
+    print(f"  Match summary — HIGH: {counts['HIGH']}  MEDIUM: {counts['MEDIUM']}  "
+          f"LOW: {counts['LOW']}  NONE: {counts['NONE']}")
+
+    # Print match table
+    print(f"\n  {'conf':<8} {'delta':>6}  {'transcript_start':<26} {'meeting_start':<26} titles")
+    print(f"  {'-'*8} {'-'*6}  {'-'*26} {'-'*26} {'-'*40}")
+    for r in matches:
+        t      = r["transcript"]
+        m      = r["meeting"]
+        conf   = r["confidence"]
+        delta  = f"{r['delta_mins']}m" if r["delta_mins"] is not None else "—"
+        t_disp = t["title"][:20]
+        m_disp = m["title"][:20] if m else "⚠️  NO MATCH"
+        m_start = m["start_str"] if m else "—"
+        print(f"  {CONF_ICON.get(conf,'?')} {conf:<6} {delta:>6}  "
+              f"{t['start_str']:<26} {m_start:<26} {t_disp} / {m_disp}")
+
+    # Summarize — HIGH and MEDIUM only, cap at MAX_TO_SUMMARIZE
     eligible = [r for r in matches if r["confidence"] in ("HIGH", "MEDIUM")]
-    print(f"\n  Eligible matches: {len(eligible)}")
 
-    pulled = []
+    if run_mode == "single":
+        eligible = eligible[:1]
+    else:
+        eligible = eligible[:MAX_TO_SUMMARIZE]
+
+    print(f"\n  Summarizing {len(eligible)} of {len(matches)} matches...")
+    summarized = 0
     for r in eligible:
-        t       = r["transcript"]
-        t_id    = t["transcript_id"]
-        m       = r["meeting"]
-        m_title = m["title"] if m else "—"
+        r["wordly_key"] = wordly_key
+        result = summarize_match(r, name, gemini_key, prompt_hs, prompt_mgmt)
+        if result:
+            summarized += 1
+        time.sleep(2)
 
-        print(f"\n  [{r['confidence']}] {t['title'][:45]} | {t['start_str']}")
-        print(f"         -> HS: {m_title[:50]}")
-
-        text, status = download_transcript(t_id, headers)
-
-        if status in ("ok", "partial"):
-            flag = "✅" if status == "ok" else "⚠️  PARTIAL"
-            print(f"         {flag}  {len(text)} chars")
-            r["text"] = text
-            pulled.append(r)
-        else:
-            print(f"         ❌  {status}")
-
-    print(f"\n  Successfully pulled: {len(pulled)} / {len(eligible)}")
-    return pulled
-
-
-# ---------------------------------------------------------------------------
-# STEP 6 — GEMINI SUMMARIZATION
-# ---------------------------------------------------------------------------
-
-def gemini_summarize(transcript_text, prompt, gemini_key):
-    """Send transcript + prompt to Gemini. Returns summary string or None."""
-    payload = {
-        "contents": [{
-            "parts": [{
-                "text": f"{prompt}\n\nTRANSCRIPT:\n{transcript_text}"
-            }]
-        }]
+    return {
+        "name":       name,
+        "status":     "ok",
+        "matched":    len(matches),
+        "high":       counts["HIGH"],
+        "medium":     counts["MEDIUM"],
+        "none":       counts["NONE"],
+        "summarized": summarized
     }
-    try:
-        res = requests.post(
-            f"{GEMINI_URL}?key={gemini_key}",
-            json=payload,
-            timeout=60
-        )
-        if res.status_code == 200:
-            data = res.json()
-            return data["candidates"][0]["content"]["parts"][0]["text"]
-        else:
-            return f"ERROR {res.status_code}: {res.text[:300]}"
-    except Exception as e:
-        return f"EXCEPTION: {e}"
-
-
-def run_summarization(pulled, gemini_key, prompt_hs, prompt_mgmt, salesperson_name):
-    section("STEP 6 — GEMINI SUMMARIZATION")
-
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    print(f"\n  Output folder: {OUTPUT_DIR}/")
-    print(f"  Processing {len(pulled)} transcript(s)...\n")
-
-    all_summaries = []
-
-    to_process = pulled[:MAX_TO_SUMMARIZE]
-    print(f"  Summarizing {len(to_process)} of {len(pulled)} (MAX_TO_SUMMARIZE={MAX_TO_SUMMARIZE})")
-
-    for i, r in enumerate(to_process):
-        t        = r["transcript"]
-        m        = r["meeting"]
-        text     = r.get("text", "")
-        m_title  = m["title"] if m else "Unmatched"
-        m_start  = m["start_str"] if m else t["start_str"]
-        conf     = r["confidence"]
-
-        # Build a clean date string for filenames
-        dt       = parse_dt(m_start) or parse_dt(t["start_str"])
-        date_str = dt.strftime("%Y-%m-%d_%H%M") if dt else "unknown"
-        contact    = m.get("contact_name", "Unknown") if m else "Unmatched"
-        safe_name  = safe_filename(f"{salesperson_name}_{date_str}_{contact}")
-
-        print(f"  [{i+1}/{len(pulled)}] {m_title[:50]}")
-        print(f"           Start : {m_start}")
-        print(f"           Conf  : {conf}")
-
-        # --- HubSpot Summary ---
-        print(f"           Generating HubSpot summary...", end=" ", flush=True)
-        hs_summary = gemini_summarize(text, prompt_hs, gemini_key)
-        print("done" if not hs_summary.startswith("ERROR") and not hs_summary.startswith("EXCEPTION") else hs_summary[:60])
-
-        # Save raw transcript
-        raw_file = os.path.join(OUTPUT_DIR, f"{safe_name}_TRANSCRIPT.txt")
-        with open(raw_file, "w", encoding="utf-8") as f:
-            f.write(text)
-        print(f"           Saved: {raw_file}")
-
-        hs_file = os.path.join(OUTPUT_DIR, f"{safe_name}_HS.txt")
-        with open(hs_file, "w", encoding="utf-8") as f:
-            f.write(f"HUBSPOT MEETING SUMMARY\n")
-            f.write(f"{'='*60}\n")
-            f.write(f"Salesperson : {salesperson_name}\n")
-            f.write(f"Meeting     : {m_title}\n")
-            f.write("Customer    : " + (m.get("contact_name", "Unknown") if m else "Unknown") + "\n")
-            f.write(f"Start Time  : {m_start}\n")
-            f.write(f"HS ID       : {m['hs_id'] if m else 'UNMATCHED'}\n")
-            f.write(f"Match Conf  : {conf}\n")
-            f.write(f"Generated   : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"{'='*60}\n\n")
-            f.write(hs_summary)
-        print(f"           Saved: {hs_file}")
-
-        # --- Sales Management Audit ---
-        # Brief pause to avoid Gemini rate limiting
-        time.sleep(1)
-        print(f"           Generating sales audit...", end=" ", flush=True)
-        mgmt_summary = gemini_summarize(text, prompt_mgmt, gemini_key)
-        print("done" if not mgmt_summary.startswith("ERROR") and not mgmt_summary.startswith("EXCEPTION") else mgmt_summary[:60])
-
-        mgmt_file = os.path.join(OUTPUT_DIR, f"{safe_name}_AUDIT.txt")
-        with open(mgmt_file, "w", encoding="utf-8") as f:
-            f.write(f"SALES MANAGEMENT AUDIT\n")
-            f.write(f"{'='*60}\n")
-            f.write(f"Salesperson : {salesperson_name}\n")
-            f.write(f"Meeting     : {m_title}\n")
-            f.write("Customer    : " + (m.get("contact_name", "Unknown") if m else "Unknown") + "\n")
-            f.write(f"Start Time  : {m_start}\n")
-            f.write(f"HS ID       : {m['hs_id'] if m else 'UNMATCHED'}\n")
-            f.write(f"Match Conf  : {conf}\n")
-            f.write(f"Generated   : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"{'='*60}\n\n")
-            f.write(mgmt_summary)
-        print(f"           Saved: {mgmt_file}\n")
-
-        all_summaries.append({
-            "match": r,
-            "hs_summary": hs_summary,
-            "mgmt_summary": mgmt_summary,
-            "hs_file": hs_file,
-            "mgmt_file": mgmt_file
-        })
-
-        # Rate limit buffer between transcripts
-        if i < len(pulled) - 1:
-            time.sleep(2)
-
-    print(f"  Done. {len(all_summaries)} transcript(s) summarized.")
-    print(f"  Files written to: ./{OUTPUT_DIR}/")
-    return all_summaries
 
 
 # ---------------------------------------------------------------------------
@@ -588,69 +560,73 @@ def run_summarization(pulled, gemini_key, prompt_hs, prompt_mgmt, salesperson_na
 # ---------------------------------------------------------------------------
 
 def main():
+    lookback_days = get_lookback_days()
+
     print()
     print("=" * 70)
-    print("  WORDLY SALES INTELLIGENCE PIPELINE — MATCHER v1.0d")
-    print(f"  Target : {TARGET_EMAIL}")
-    print(f"  Window : last {LOOKBACK_DAYS} days")
-    print(f"  Run at : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("  WORDLY SALES INTELLIGENCE PIPELINE — v2.0 (Multi-Salesperson)")
+    print(f"  Mode      : {RUN_MODE.upper()} (last {lookback_days} day(s))")
+    print(f"  Run at    : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 70)
 
-    print("\nLoading keys and prompts...")
-    wordly_key  = load_key(WORDLY_KEY_FILE)
+    print("\nLoading keys and config...")
     hs_key      = load_key(HS_KEY_FILE)
-    slack_url   = load_key(SLACK_WEBHOOK_FILE)
     gemini_key  = load_key(GEMINI_KEY_FILE)
+    slack_url   = load_key(SLACK_WEBHOOK_FILE)
     prompt_hs   = load_prompt(PROMPT_HS_FILE)
     prompt_mgmt = load_prompt(PROMPT_MGMT_FILE)
+    salespeople = load_salespeople()
 
-    if not wordly_key or not hs_key:
-        print("\n⛔  Cannot proceed — missing Wordly or HubSpot key.")
-        sys.exit(1)
-    if not gemini_key:
-        print("\n⛔  Cannot proceed — missing Gemini API key.")
+    if not hs_key or not gemini_key:
+        print("\n⛔  Cannot proceed — missing HubSpot or Gemini key.")
         sys.exit(1)
     if not prompt_hs or not prompt_mgmt:
         print("\n⛔  Cannot proceed — missing prompt files.")
         sys.exit(1)
-
-    owner = resolve_owner(hs_key, TARGET_EMAIL)
-    if not owner:
+    if not salespeople:
+        print(f"\n⛔  Cannot proceed — {SALESPEOPLE_FILE} empty or missing.")
         sys.exit(1)
 
-    salesperson_name = f"{owner.get('firstName','')} {owner.get('lastName','')}".strip()
+    print(f"\nFetching HubSpot owner list...")
+    all_owners = fetch_all_owners(hs_key)
+    print(f"  {len(all_owners)} owners found in HubSpot")
 
-    meetings    = pull_hs_meetings(hs_key, owner["id"], LOOKBACK_DAYS)
-    transcripts = pull_wordly_transcripts(wordly_key, LOOKBACK_DAYS, MIN_DURATION_MINS)
+    slack_notify(slack_url,
+        f"🚀 *Sales Pipeline started* — Mode: {RUN_MODE.upper()} | "
+        f"{len(salespeople)} salespeople | Last {lookback_days} day(s)")
 
-    if not transcripts:
-        print("\n⚠️  No transcripts to process.")
-        sys.exit(0)
+    results = []
+    for person in salespeople:
+        if not person["wordly_api_key"]:
+            print(f"\n  ⚠️  Skipping {person['name']} — no API key in CSV")
+            continue
+        result = run_person(
+            person, hs_key, gemini_key, slack_url,
+            prompt_hs, prompt_mgmt, all_owners,
+            lookback_days, RUN_MODE
+        )
+        results.append(result)
+        time.sleep(3)  # Pause between people
 
-    matches = match(transcripts, meetings, MATCH_WINDOW_MINS)
-    pulled  = pull_transcript_texts(matches, wordly_key)
-
-    if not pulled:
-        print("\n⚠️  No transcript text pulled. Cannot summarize.")
-        sys.exit(0)
-
-    summaries = run_summarization(pulled, gemini_key, prompt_hs, prompt_mgmt, salesperson_name)
-
-    # Slack notification
-    counts = Counter(r["confidence"] for r in matches)
-    slack_notify(
-        slack_url,
-        f"✅ *Pipeline complete* — `{salesperson_name}`\n"
-        f"Transcripts matched: {len(pulled)}  |  Summaries generated: {len(summaries)}\n"
-        f"Match quality — HIGH: {counts['HIGH']}  MEDIUM: {counts['MEDIUM']}  "
-        f"LOW: {counts['LOW']}  NONE: {counts['NONE']}\n"
-        f"Files saved to `./summaries/`"
-    )
-
+    # Final summary
     section("PIPELINE COMPLETE")
-    print(f"\n  Summaries written: {len(summaries)}")
-    print(f"  Folder: ./{OUTPUT_DIR}/")
-    print(f"\n  Open the files and review before we wire up HubSpot writes.\n")
+    total_summarized = sum(r.get("summarized", 0) for r in results)
+    print(f"\n  {'Name':<30} {'Status':<15} {'Matched':>8} {'Summarized':>12}")
+    print(f"  {'-'*30} {'-'*15} {'-'*8} {'-'*12}")
+    for r in results:
+        print(f"  {r['name']:<30} {r['status']:<15} "
+              f"{r.get('matched',0):>8} {r.get('summarized',0):>12}")
+
+    print(f"\n  Total summaries generated: {total_summarized}")
+    print(f"  Output folder: ./{OUTPUT_DIR}/")
+
+    slack_notify(slack_url,
+        f"✅ *Sales Pipeline complete* — {RUN_MODE.upper()}\n"
+        f"People processed: {len(results)}\n"
+        f"Total summaries: {total_summarized}\n"
+        f"Files in `./summaries/`")
+
+    print()
 
 
 if __name__ == "__main__":
