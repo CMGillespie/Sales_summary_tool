@@ -532,10 +532,10 @@ def run_person(person, hs_key, gemini_key, slack_url, prompt_hs, prompt_mgmt,
 
     if run_mode == "single":
         eligible = eligible[:1]
-    else:
-        eligible = eligible[:MAX_TO_SUMMARIZE]
+    # week/day modes: summarize all HIGH and MEDIUM matches
 
-    print(f"\n  Summarizing {len(eligible)} of {len(matches)} matches...")
+    total_eligible = len([r for r in matches if r["confidence"] in ("HIGH", "MEDIUM")])
+    print(f"\n  Summarizing {len(eligible)} HIGH/MEDIUM matches ({len(matches)} total)...")
     summarized = 0
     for r in eligible:
         r["wordly_key"] = wordly_key
