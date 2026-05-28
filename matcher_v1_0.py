@@ -35,7 +35,7 @@ HS_BASE_URL        = "https://api.hubapi.com"
 GEMINI_URL         = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
 # RUN_MODE: "single" = 1 meeting per person, "day" = today, "week" = last 7 days
-RUN_MODE           = "single"
+RUN_MODE           = "week"
 
 # Matching config
 MATCH_WINDOW_MINS  = 15
