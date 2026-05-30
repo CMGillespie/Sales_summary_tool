@@ -35,7 +35,7 @@ HS_BASE_URL        = "https://api.hubapi.com"
 GEMINI_URL         = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
 # RUN_MODE: "single" = 1 meeting per person, "day" = today, "week" = last 7 days
-RUN_MODE           = "week"
+RUN_MODE           = "single"
 
 # Matching config
 MATCH_WINDOW_MINS  = 15
@@ -407,17 +407,20 @@ def summarize_match(r, person_name, gemini_key, prompt_hs, prompt_mgmt):
         print(f"    ⚠️  Download failed: {status}")
         return None
 
-    m_title  = m["title"] if m else "Unmatched"
-    m_start  = m["start_str"] if m else t["start_str"]
-    dt       = parse_dt(m_start) or parse_dt(t["start_str"])
-    date_str = dt.strftime("%Y-%m-%d_%H%M") if dt else "unknown"
-    safe_n   = safe_filename(person_name.replace(" ", "_"))
-    base     = f"{safe_n}_{date_str}"
+    m_title   = m["title"] if m else "Unmatched"
+    m_start   = m["start_str"] if m else t["start_str"]
+    dt        = parse_dt(m_start) or parse_dt(t["start_str"])
+    date_str  = dt.strftime("%Y-%m-%d") if dt else "unknown"
+    time_str  = dt.strftime("%H%M") if dt else "0000"
+    safe_n    = safe_filename(person_name.replace(" ", "_"))
+    base      = f"{safe_n}_{time_str}"
 
+    # Subfolder structure: summaries/Person Name/YYYY-MM-DD/
     person_dir = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
         OUTPUT_DIR,
-        safe_filename(person_name)
+        safe_filename(person_name),
+        date_str
     )
     os.makedirs(person_dir, exist_ok=True)
 
@@ -449,7 +452,7 @@ def summarize_match(r, person_name, gemini_key, prompt_hs, prompt_mgmt):
     save("AUDIT", mgmt_summary,
          f"SALES AUDIT\nSalesperson: {person_name}\nMeeting: {m_title}\nDate: {m_start}\nHS ID: {m['hs_id'] if m else 'UNMATCHED'}\nMatch: {conf}")
 
-    print(f"    Files saved: {safe_filename(person_name)}/{base}_*.txt")
+    print(f"    Files saved: {safe_filename(person_name)}/{date_str}/{base}_*.txt")
     return {"hs": hs_summary, "audit": mgmt_summary, "base": base}
 
 
