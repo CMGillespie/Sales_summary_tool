@@ -21,3 +21,4 @@ __pycache__/
 .DS_Store
 salespeople.csv
 *.gsheet
+!prompts/*.txt
