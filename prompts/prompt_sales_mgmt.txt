@@ -24,6 +24,22 @@ AREAS FOR IMPROVEMENT
 2-4 specific, actionable coaching points. Be direct but constructive.
 
 OVERALL ASSESSMENT
-A one paragraph summary of the salesperson's performance on this call with an overall rating: Excellent / Good / Needs Improvement.
+A one paragraph summary of the salesperson's performance on this call.
+
+---
+
+GRADING RUBRIC
+After completing your full written analysis above, assign a grade using the scale below. The grade should reflect your honest assessment based on the evidence in the transcript. A 3 is a solid professional call — not a failing grade.
+
+5 — Exceptional. Textbook call. Strong discovery, excellent positioning, clear next steps, outstanding rapport. Worth sharing as a team example.
+4 — Strong. Minor gaps but solid overall performance. Above expectations.
+3 — Competent. Met the standard. Nothing notable either way. Expected baseline performance.
+2 — Needs attention. Identifiable gaps in discovery, positioning, or follow-through. Coaching recommended.
+1 — Significant concerns. Multiple issues across the call. Recommend immediate one-on-one coaching conversation.
+
+End your response with exactly this line (no other text after it):
+GRADE: X
+
+Where X is the number 1 through 5.
 
 Be honest and specific. This report is for internal sales management use only and will not be shared with the customer or the salesperson without review.
