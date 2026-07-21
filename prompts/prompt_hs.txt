@@ -22,14 +22,26 @@ List everyone identified on the call. For each person include:
 - Company / Organization (if stated — note that some attendees may be from third-party companies such as AV integrators, consultants, or partners)
 If names were not introduced, write: Not identified — attendee introductions were not conducted.
 
-WHAT BROUGHT THEM TO WORDLY
-What problem, trigger, or event caused them to reach out or agree to this call? What are they trying to solve? Quote or closely paraphrase where possible.
+WHAT BROUGHT THEM HERE
+Two parts:
+1. What triggered their need for transcription or translation? (regulatory requirement, serving multilingual constituents, internal accessibility request, event captioning, etc.)
+2. What brought them specifically to Wordly? Have they looked at or tried other solutions? If so, what were their reflections?
 
 PAIN POINTS
 Specific challenges, frustrations, or unmet needs the customer explicitly stated. Be concrete — avoid vague generalities.
+
+KEY DATES
+Any dates or timeframes mentioned by the customer relating to:
+- Desired test or pilot start
+- Decision deadline
+- Required go-live date
+- Contract renewal or expiry
+- Upcoming events that are driving urgency
+Format each as: [Description]: [Date or timeframe as stated]
+If none mentioned, write: None identified.
 
 MEETING SUMMARY
 3-5 sentences summarizing what was discussed, what was demonstrated or proposed, and the general outcome of the call.
 
 NEXT STEPS
-Bullet points capturing any commitments made, follow-up actions, items to send, or agreed next contact. Include who is responsible for each action where stated.
+Bullet points capturing any commitments made, follow-up actions, items to send, or agreed next contact. Include who is responsible for each action where stated. If no next steps were established, note that explicitly.

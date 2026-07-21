@@ -1,7 +1,7 @@
 """
 PROJECT: Wordly Sales Intelligence Pipeline
 SCRIPT:  matcher_v1_0.py
-VERSION: 2.1
+VERSION: 2.2
 CHANGES: - Olivia-only test mode (TARGET_REP filter)
          - 10-day lookback for test run
          - HubSpot note write per matched call (meeting summary only)
@@ -11,8 +11,11 @@ CHANGES: - Olivia-only test mode (TARGET_REP filter)
          - Management review CSV (rep, date, grade, audit file link)
          - Processed log (JSON) to prevent duplicate summarization
          - salespeople.csv — skip anyone with empty API key
+         - Competitive intelligence prompt (prompt_competitive.txt)
+         - Roadmap/feature request prompt (prompt_roadmap.txt)
+         - Both new outputs gracefully skipped if prompt file missing
 AUTHOR:  Built with Claude
-DATE:    2026-06-24
+DATE:    2026-07-14
 """
 
 import requests
@@ -30,8 +33,10 @@ from collections import Counter
 HS_KEY_FILE        = "HS_Service_key.txt"
 GEMINI_KEY_FILE    = "gemini_api_key.txt"
 SLACK_WEBHOOK_FILE = "slack_webhook.txt"
-PROMPT_HS_FILE     = "prompt_hs.txt"
-PROMPT_MGMT_FILE   = "prompt_sales_mgmt.txt"
+PROMPT_HS_FILE          = "prompts/prompt_hs.txt"
+PROMPT_MGMT_FILE        = "prompts/prompt_sales_mgmt.txt"
+PROMPT_COMPETITIVE_FILE = "prompts/prompt_competitive.txt"
+PROMPT_ROADMAP_FILE     = "prompts/prompt_roadmap.txt"
 SALESPEOPLE_FILE   = "salespeople.csv"
 PROCESSED_FILE     = "processed_log.json"
 REVIEW_CSV_FILE    = "management_review.csv"
@@ -41,7 +46,7 @@ HS_BASE_URL        = "https://api.hubapi.com"
 GEMINI_URL         = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
 # Filter to one rep for test run. Set to None to run all.
-TARGET_REP         = "Olivia O'Donnell"
+TARGET_REP         = None
 
 # RUN_MODE: "single" = 1 meeting per person, "day" = 1 day, "week" = 7 days, "ten" = 10 days
 RUN_MODE           = "ten"
@@ -54,7 +59,7 @@ MIN_DURATION_MINS  = 5
 # HubSpot portal ID for contact links
 HS_PORTAL_ID       = "5315820"
 
-OUTPUT_DIR         = "summaries"
+OUTPUT_DIR         = "/Users/wordly_apps/Library/CloudStorage/GoogleDrive-chris.gillespie@wordly.ai/My Drive/Code/Sales_summary_tool/summaries"
 
 # ---------------------------------------------------------------------------
 # HELPERS
@@ -528,6 +533,7 @@ def get_customer_name_from_transcript(transcript_text, gemini_key):
 # ---------------------------------------------------------------------------
 
 def summarize_match(r, person_name, hs_key, gemini_key, prompt_hs, prompt_mgmt,
+                    prompt_competitive, prompt_roadmap,
                     processed, output_dir):
     t      = r["transcript"]
     m      = r["meeting"]
@@ -629,22 +635,8 @@ def summarize_match(r, person_name, hs_key, gemini_key, prompt_hs, prompt_mgmt,
     # --- Sales Audit with 1-5 Grade ---
     print(f"    Generating sales audit...", end=" ", flush=True)
 
-    grading_rubric = """
-GRADING RUBRIC — assign one of these grades at the END of your audit:
-  5 — Exceptional. Textbook call. Worth sharing as a team example.
-  4 — Strong. Minor gaps but solid overall performance.
-  3 — Competent. Met the standard. Nothing notable either way.
-  2 — Needs attention. Identifiable gaps in discovery, positioning, or follow-through.
-  1 — Significant concerns. Multiple issues. Recommend immediate coaching conversation.
-
-After your full written analysis, end your response with exactly this format on its own line:
-GRADE: X
-(where X is the number 1-5)
-"""
-
     mgmt_summary = gemini_call(
-        f"{prompt_mgmt}\n\n{grading_rubric}\n\n"
-        f"Salesperson: {person_name}\n"
+        f"{prompt_mgmt}\n\nSalesperson: {person_name}\n"
         f"Customer: {customer_name}\n"
         f"Meeting: {m_title}\n"
         f"Date: {date_disp} {time_disp}\n\n"
@@ -665,6 +657,42 @@ GRADE: X
         f"Salesperson: {person_name}\nCustomer: {customer_name}\n"
         f"Meeting: {m_title}\nDate: {m_start}\n"
         f"HS Meeting ID: {m_hs_id or 'UNMATCHED'}\nMatch: {conf}")
+
+    # --- Competitive Intelligence ---
+    if prompt_competitive:
+        print(f"    Generating competitive intelligence...", end=" ", flush=True)
+        comp_summary = gemini_call(
+            f"{prompt_competitive}\n\nSalesperson: {person_name}\n"
+            f"Customer: {customer_name}\nMeeting: {m_title}\n\n"
+            f"TRANSCRIPT:\n{text}",
+            gemini_key
+        )
+        ok_comp = not comp_summary.startswith("ERROR") and not comp_summary.startswith("EXCEPTION")
+        print("✅" if ok_comp else "❌")
+        if ok_comp:
+            save("COMPETITIVE",
+                comp_summary,
+                f"COMPETITIVE INTELLIGENCE\nSalesperson: {person_name}\n"
+                f"Customer: {customer_name}\nMeeting: {m_title}\nDate: {m_start}")
+        time.sleep(2)
+
+    # --- Roadmap / Feature Requests ---
+    if prompt_roadmap:
+        print(f"    Generating roadmap intelligence...", end=" ", flush=True)
+        roadmap_summary = gemini_call(
+            f"{prompt_roadmap}\n\nSalesperson: {person_name}\n"
+            f"Customer: {customer_name}\nMeeting: {m_title}\n\n"
+            f"TRANSCRIPT:\n{text}",
+            gemini_key
+        )
+        ok_road = not roadmap_summary.startswith("ERROR") and not roadmap_summary.startswith("EXCEPTION")
+        print("✅" if ok_road else "❌")
+        if ok_road:
+            save("ROADMAP",
+                roadmap_summary,
+                f"ROADMAP & FEATURE REQUESTS\nSalesperson: {person_name}\n"
+                f"Customer: {customer_name}\nMeeting: {m_title}\nDate: {m_start}")
+        time.sleep(2)
 
     print(f"    Files: {safe_filename(person_name)}/{date_str}/{base}_*.txt")
 
@@ -704,6 +732,7 @@ GRADE: X
 # ---------------------------------------------------------------------------
 
 def run_person(person, hs_key, gemini_key, slack_url, prompt_hs, prompt_mgmt,
+               prompt_competitive, prompt_roadmap,
                all_owners, lookback_days, run_mode, processed, output_dir):
     name       = person["name"]
     email      = person["email"]
@@ -778,7 +807,8 @@ def run_person(person, hs_key, gemini_key, slack_url, prompt_hs, prompt_mgmt,
         r["wordly_key"] = wordly_key
         result = summarize_match(
             r, name, hs_key, gemini_key,
-            prompt_hs, prompt_mgmt, processed, output_dir
+            prompt_hs, prompt_mgmt, prompt_competitive, prompt_roadmap,
+            processed, output_dir
         )
         if result:
             summarized += 1
@@ -814,8 +844,10 @@ def main():
     hs_key      = load_key(HS_KEY_FILE)
     gemini_key  = load_key(GEMINI_KEY_FILE)
     slack_url   = load_key(SLACK_WEBHOOK_FILE)
-    prompt_hs   = load_prompt(PROMPT_HS_FILE)
-    prompt_mgmt = load_prompt(PROMPT_MGMT_FILE)
+    prompt_hs          = load_prompt(PROMPT_HS_FILE)
+    prompt_mgmt        = load_prompt(PROMPT_MGMT_FILE)
+    prompt_competitive = load_prompt(PROMPT_COMPETITIVE_FILE)
+    prompt_roadmap     = load_prompt(PROMPT_ROADMAP_FILE)
     salespeople = load_salespeople()
     processed   = load_processed()
 
@@ -860,8 +892,8 @@ def main():
     for person in salespeople:
         result = run_person(
             person, hs_key, gemini_key, slack_url,
-            prompt_hs, prompt_mgmt, all_owners,
-            lookback_days, RUN_MODE, processed, output_dir
+            prompt_hs, prompt_mgmt, prompt_competitive, prompt_roadmap,
+            all_owners, lookback_days, RUN_MODE, processed, output_dir
         )
         results.append(result)
         time.sleep(3)
