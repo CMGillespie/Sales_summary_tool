@@ -482,18 +482,25 @@ def get_meeting_details(hs_key, meeting_id):
     return result
 
 
-def write_hs_note(hs_key, contact_id, note_body):
+def write_hs_note(hs_key, contact_id, note_body, company_id=None):
     headers = {"Authorization": f"Bearer {hs_key}", "Content-Type": "application/json"}
+    associations = [{
+        "to":    {"id": contact_id},
+        "types": [{"associationCategory": "HUBSPOT_DEFINED",
+                   "associationTypeId": 202}]
+    }]
+    if company_id:
+        associations.append({
+            "to":    {"id": company_id},
+            "types": [{"associationCategory": "HUBSPOT_DEFINED",
+                       "associationTypeId": 190}]
+        })
     payload = {
         "properties": {
             "hs_note_body": note_body,
             "hs_timestamp": str(int(datetime.now().timestamp() * 1000)),
         },
-        "associations": [{
-            "to":    {"id": contact_id},
-            "types": [{"associationCategory": "HUBSPOT_DEFINED",
-                       "associationTypeId": 202}]
-        }]
+        "associations": associations
     }
     try:
         res = requests.post(f"{HS_BASE_URL}/crm/v3/objects/notes",
@@ -662,6 +669,26 @@ def summarize_match(r, person_name, hs_key, gemini_key,
         print(f"    ⚠️  Download failed: {status}")
         return None, processed_file_id, review_csv_file_id
 
+    # Check for merged session (restart detected)
+    merged = r.get("_merged")
+    session_restart_note = ""
+    if merged:
+        t2_id = merged["transcript"]["transcript_id"]
+        text2, status2 = download_transcript(t2_id, wordly_key)
+        if text2:
+            # Concatenate in chronological order
+            if merged["transcript"]["start"] < t["start"]:
+                text = text2 + "\n\n[--- SESSION RESTART ---]\n\n" + text
+            else:
+                text = text + "\n\n[--- SESSION RESTART ---]\n\n" + text2
+            session_restart_note = "Note: Summary covers 2 Wordly sessions from the same meeting (session restart detected).\n"
+            print(f"    ⚠️  Session restart detected — transcripts merged")
+            # Mark second transcript as processed too
+            processed[t2_id] = {
+                "processed_at": datetime.now(timezone.utc).isoformat(),
+                "rep": person_name, "company": "merged", "date": date_str, "grade": "merged"
+            }
+
     m_hs_id   = m["hs_id"] if m else None
     m_start   = m["start_str"] if m else t["start_str"]
     dt        = parse_dt(m_start) or parse_dt(t["start_str"])
@@ -736,7 +763,7 @@ def summarize_match(r, person_name, hs_key, gemini_key,
     # Call type extracted but not used in filename (kept for review CSV)
     call_type = extract_call_type_abbrev(hs_summary) if ok_hs else "CALL"
 
-    hs_note_body = f"{hs_header}\n\n{hs_summary}"
+    hs_note_body = f"{hs_header}\n{session_restart_note}\n{hs_summary}"
     hs_note_body = hs_note_body.replace("**", "").replace("## ", "").replace("# ", "")
     save_file(hs_person_folder, "HS", hs_note_body,
               f"HUBSPOT SUMMARY\nSalesperson: {person_name}\n"
@@ -746,7 +773,7 @@ def summarize_match(r, person_name, hs_key, gemini_key,
     note_id = None
     if contact_id and ok_hs:
         print(f"    Writing to HubSpot...", end=" ", flush=True)
-        note_id = write_hs_note(hs_key, contact_id, hs_note_body)
+        note_id = write_hs_note(hs_key, contact_id, hs_note_body, company_id=details.get("company_id"))
         print(f"✅  Note {note_id}" if note_id else "❌")
     time.sleep(2)
 
@@ -875,6 +902,38 @@ def run_person(person, hs_key, gemini_key, slack_url,
           f"LOW={counts['LOW']} NONE={counts['NONE']}")
 
     eligible   = [r for r in matches if r["confidence"] in ("HIGH", "MEDIUM")]
+
+    # --- Session restart merge ---
+    # If two eligible matches share the same company and are within 10 minutes
+    # of each other, treat them as one session (restart detected).
+    # Concatenate transcripts, process as one summary.
+    from itertools import combinations
+    MERGE_WINDOW_MINS = 10
+    merged_ids = set()
+    merged_matches = []
+
+    for i, r1 in enumerate(eligible):
+        if id(r1) in merged_ids:
+            continue
+        for r2 in eligible[i+1:]:
+            if id(r2) in merged_ids:
+                continue
+            # Check same company and close start times
+            c1 = r1.get("company_name", "") or ""
+            c2 = r2.get("company_name", "") or ""
+            t1 = r1["transcript"]["start"]
+            t2 = r2["transcript"]["start"]
+            if (c1 and c1 == c2 and t1 and t2):
+                delta = abs((t1 - t2).total_seconds() / 60)
+                if delta <= MERGE_WINDOW_MINS:
+                    # Merge r2 into r1
+                    r1["_merged"] = r2
+                    merged_ids.add(id(r2))
+                    break
+        merged_matches.append(r1)
+
+    eligible = merged_matches
+
     summarized = 0
     summaries_log = []
     for r in eligible:
@@ -944,7 +1003,8 @@ def main():
     print(f"  Processed log: {len(processed)} entries")
 
     # Load review CSV file ID
-    review_csv_file_id = drive_find_file(drive_service, REVIEW_CSV_FILENAME, GDRIVE_SRC_FOLDER_ID)
+    review
+    _csv_file_id = drive_find_file(drive_service, REVIEW_CSV_FILENAME, GDRIVE_SRC_FOLDER_ID)
 
     if TARGET_REP:
         salespeople = [p for p in salespeople
