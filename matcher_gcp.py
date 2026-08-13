@@ -764,7 +764,12 @@ def summarize_match(r, person_name, hs_key, gemini_key,
     call_type = extract_call_type_abbrev(hs_summary) if ok_hs else "CALL"
 
     hs_note_body = f"{hs_header}\n{session_restart_note}\n{hs_summary}"
-    hs_note_body = hs_note_body.replace("**", "").replace("## ", "").replace("# ", "")
+    hs_note_body = (hs_note_body
+        .replace("**", "")
+        .replace("## ", "")
+        .replace("# ", "")
+        .replace("* ", "- ")
+        .replace("*	", "- "))
     save_file(hs_person_folder, "HS", hs_note_body,
               f"HUBSPOT SUMMARY\nSalesperson: {person_name}\n"
               f"Customer: {customer_name} | Company: {company_name}\n"
