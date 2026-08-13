@@ -1008,8 +1008,7 @@ def main():
     print(f"  Processed log: {len(processed)} entries")
 
     # Load review CSV file ID
-    review
-    _csv_file_id = drive_find_file(drive_service, REVIEW_CSV_FILENAME, GDRIVE_SRC_FOLDER_ID)
+    review_csv_file_id = drive_find_file(drive_service, REVIEW_CSV_FILENAME, GDRIVE_SRC_FOLDER_ID)
 
     if TARGET_REP:
         salespeople = [p for p in salespeople
