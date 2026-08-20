@@ -1157,6 +1157,7 @@ def main():
     # Load review CSV file ID
     review_csv_file_id = drive_find_file(drive_service, REVIEW_CSV_FILENAME, GDRIVE_SRC_FOLDER_ID)
 
+    salespeople_all = salespeople[:]  # keep full list for intel
     if TARGET_REP:
         salespeople = [p for p in salespeople
                        if p["name"].lower() == TARGET_REP.lower()]
@@ -1183,6 +1184,22 @@ def main():
         )
         results.append(result)
         time.sleep(3)
+
+    # ── Company Intel — runs independently for intel-flagged reps ──────────
+    intel_reps = [p for p in salespeople_all if p.get("intel_active")]
+    if intel_reps and prompt_intel:
+        print(f"\nRunning company intel for {len(intel_reps)} rep(s)...")
+        for person in intel_reps:
+            owner    = resolve_owner(person["email"], all_owners)
+            owner_id = owner.get("id") if owner else None
+            if not owner_id:
+                continue
+            intel_meetings = pull_hs_meetings(hs_key, owner_id,
+                                              lookback_hours=lookback_hours,
+                                              lookback_days=lookback_days)
+            if intel_meetings:
+                run_company_intel(person["name"], intel_meetings, hs_key,
+                                  gemini_key, slack_intel, prompt_intel, drive_service)
 
     section("PIPELINE COMPLETE")
     total = sum(r.get("summarized", 0) for r in results)
