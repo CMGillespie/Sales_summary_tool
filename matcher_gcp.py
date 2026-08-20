@@ -41,10 +41,12 @@ GDRIVE_AUDITS_FOLDER_ID       = os.environ.get("GDRIVE_AUDITS_FOLDER_ID",       
 GDRIVE_COMPETITIVE_FOLDER_ID  = os.environ.get("GDRIVE_COMPETITIVE_FOLDER_ID",  "1a5LiCw49p0PRzbsJjZbr67jvc25Q7K-f")
 GDRIVE_ROADMAP_FOLDER_ID      = os.environ.get("GDRIVE_ROADMAP_FOLDER_ID",      "18FR5sc4-nn0bkMU641Y56U7Q81-5mu_d")
 GDRIVE_TRANSCRIPTS_FOLDER_ID  = os.environ.get("GDRIVE_TRANSCRIPTS_FOLDER_ID",  "1IVN-QEk0nyO3AHQGXvV5v_3XE_gUaiZR")
+GDRIVE_INTEL_FOLDER_ID        = os.environ.get("GDRIVE_INTEL_FOLDER_ID",        "1MLjzrE3QYpVfYKve42sJWCq0DmHDwMo4")
 
 SECRET_HS_KEY    = "hs-service-key"
 SECRET_GEMINI    = "gemini-api-key"
 SECRET_SLACK     = "slack-webhook"
+SECRET_SLACK_INTEL = "slack-webhook-intel"
 
 WORDLY_BASE_URL  = "https://api.wordly.ai"
 HS_BASE_URL      = "https://api.hubapi.com"
@@ -175,8 +177,9 @@ def load_salespeople(service):
         if active not in ("true", "1", "yes"):
             continue
         people.append({
-            "name":  row.get("name", "").strip(),
-            "email": row.get("email", "").strip().lower(),
+            "name":         row.get("name", "").strip(),
+            "email":        row.get("email", "").strip().lower(),
+            "intel_active": row.get("HS_company_intel_active", "false").strip().lower() in ("true","1","yes")
         })
     print(f"  ✅  Loaded {len(people)} active salespeople")
     return people
@@ -294,6 +297,119 @@ def safe_filename(s):
 def extract_grade(audit_text):
     m = re.search(r'GRADE:\s*([1-5])', audit_text[-500:])
     return int(m.group(1)) if m else None
+
+
+def extract_competitors(hs_summary):
+    import re
+    m = re.search(r'COMPETITORS MENTIONED\s*\n(.*?)(?:\n[A-Z ]{3,}\n|$)',
+                  hs_summary, re.DOTALL)
+    if m:
+        block = m.group(1).strip()
+        if block and "none" not in block.lower():
+            return block
+    return None
+
+
+def extract_deal_health(hs_summary):
+    import re
+    m = re.search(r'DEAL HEALTH\s*\n.*?(\d)/5', hs_summary[:1000], re.DOTALL)
+    if m:
+        return m.group(1)
+    return None
+
+
+def get_company_contacts(hs_key, company_id):
+    headers = {"Authorization": f"Bearer {hs_key}"}
+    try:
+        res = requests.get(
+            f"{HS_BASE_URL}/crm/v3/objects/companies/{company_id}/associations/contacts",
+            headers=headers, timeout=10)
+        if res.status_code != 200:
+            return []
+        contact_ids = [r["id"] for r in res.json().get("results", [])]
+        contacts = []
+        for cid in contact_ids[:10]:
+            cr = requests.get(
+                f"{HS_BASE_URL}/crm/v3/objects/contacts/{cid}"
+                f"?properties=firstname,lastname,email,jobtitle,num_contacted_notes",
+                headers=headers, timeout=10)
+            if cr.status_code == 200:
+                contacts.append(cr.json())
+        return contacts
+    except:
+        return []
+
+
+def get_company_deals(hs_key, company_id):
+    headers = {"Authorization": f"Bearer {hs_key}"}
+    try:
+        res = requests.get(
+            f"{HS_BASE_URL}/crm/v3/objects/companies/{company_id}/associations/deals",
+            headers=headers, timeout=10)
+        if res.status_code != 200:
+            return []
+        deal_ids = [r["id"] for r in res.json().get("results", [])]
+        deals = []
+        for did in deal_ids[:5]:
+            dr = requests.get(
+                f"{HS_BASE_URL}/crm/v3/objects/deals/{did}"
+                f"?properties=dealname,dealstage,amount,closedate",
+                headers=headers, timeout=10)
+            if dr.status_code == 200:
+                deals.append(dr.json())
+        return deals
+    except:
+        return []
+
+
+def run_company_intel(rep_name, meetings, hs_key, gemini_key, slack_intel,
+                      prompt_intel, drive_service):
+    if not meetings:
+        return
+    seen_companies = set()
+    for m in meetings[:5]:
+        contact_id, customer_info = get_meeting_contact(hs_key, m["hs_id"]) if m.get("hs_id") else (None, None)
+        if not customer_info:
+            continue
+        company_name = customer_info.get("company", "") if isinstance(customer_info, dict) else ""
+        company_id   = customer_info.get("company_id", "") if isinstance(customer_info, dict) else ""
+        if not company_name or company_name in seen_companies:
+            continue
+        seen_companies.add(company_name)
+        all_contacts = get_company_contacts(hs_key, company_id) if company_id else []
+        deals        = get_company_deals(hs_key, company_id) if company_id else []
+        hs_context   = f"Contact: {customer_info.get('name','?')} | {customer_info.get('title','?')}"
+        hs_context  += f"\nCompany: {company_name}"
+        if deals:
+            for d in deals[:3]:
+                p = d.get("properties", {})
+                hs_context += f"\nDeal: {p.get('dealname','?')} | Stage: {p.get('dealstage','?')} | Amount: {p.get('amount','?')}"
+        if all_contacts:
+            hs_context += f"\nOther contacts at company: {len(all_contacts)}"
+            for c in all_contacts[:3]:
+                p = c.get("properties", {})
+                cname = f"{p.get('firstname','')} {p.get('lastname','')}".strip()
+                hs_context += f"\n  - {cname} | {p.get('jobtitle','?')} | contacted {p.get('num_contacted_notes','0')}x"
+        print(f"  [Intel] Running for {company_name}...")
+        brief = gemini_call(f"{prompt_intel}\n\nHubSpot and context data:\n{hs_context}", gemini_key)
+        ok = not brief.startswith(("ERROR", "EXCEPTION"))
+        print(f"  [Intel] {'OK' if ok else 'FAIL'} {company_name}")
+        if ok:
+            date_str   = datetime.now().strftime("%Y-%m-%d")
+            safe_co    = safe_filename(company_name.replace(" ", "_"))[:40]
+            safe_rep   = safe_filename(rep_name.split()[0])
+            filename   = f"{date_str}_{safe_rep}_{safe_co}-Intel.txt"
+            rep_folder = drive_get_or_create_folder(
+                drive_service, safe_filename(rep_name), GDRIVE_INTEL_FOLDER_ID)
+            drive_write_text(drive_service, filename,
+                f"COMPANY INTEL BRIEF\n{'='*60}\nCompany: {company_name}\nRep: {rep_name}\nGenerated: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n{'='*60}\n\n{brief}",
+                rep_folder)
+            if slack_intel:
+                try:
+                    requests.post(slack_intel, json={"text": f"🔍 *Company Intel* — {rep_name}\n*{company_name}*\nFile: `{filename}`"}, timeout=10)
+                except:
+                    pass
+
 
 
 def extract_call_type_abbrev(hs_summary):
@@ -763,7 +879,14 @@ def summarize_match(r, person_name, hs_key, gemini_key,
     # Call type extracted but not used in filename (kept for review CSV)
     call_type = extract_call_type_abbrev(hs_summary) if ok_hs else "CALL"
 
-    hs_note_body = f"{hs_header}\n{session_restart_note}\n{hs_summary}"
+    competitors = extract_competitors(hs_summary)
+    deal_health = extract_deal_health(hs_summary)
+    signal_lines = ""
+    if competitors:
+        signal_lines += f"\nCompetitors Mentioned\n{competitors}"
+    if deal_health:
+        signal_lines += f"\n\nOverall deal health estimate\n{deal_health}/5"
+    hs_note_body = f"{hs_header}\n{session_restart_note}{signal_lines}\n\n{hs_summary}"
     hs_note_body = (hs_note_body
         .replace("**", "")
         .replace("## ", "")
@@ -857,8 +980,8 @@ def summarize_match(r, person_name, hs_key, gemini_key,
 # PER-PERSON PIPELINE
 # ---------------------------------------------------------------------------
 
-def run_person(person, hs_key, gemini_key, slack_url,
-               prompt_hs, prompt_mgmt, prompt_competitive, prompt_roadmap,
+def run_person(person, hs_key, gemini_key, slack_url, slack_intel,
+               prompt_hs, prompt_mgmt, prompt_competitive, prompt_roadmap, prompt_intel,
                all_owners, processed, processed_file_id, review_csv_file_id,
                drive_service, lookback_hours=None, lookback_days=None):
 
@@ -897,6 +1020,24 @@ def run_person(person, hs_key, gemini_key, slack_url,
     if not transcripts:
         return {"name": name, "status": "no_transcripts", "matched": 0, "summarized": 0}, \
                processed_file_id, review_csv_file_id
+
+    if meetings:
+        deduped = []
+        used_times = []
+        sorted_meetings = sorted(meetings,
+            key=lambda m: (1 if m["title"].startswith("Calendly:") else 0,
+                           m["start"] or datetime.min.replace(tzinfo=timezone.utc)))
+        for m in sorted_meetings:
+            if not m["start"]:
+                deduped.append(m)
+                continue
+            is_dup = any(abs((m["start"] - t).total_seconds()) < 120 for t in used_times)
+            if not is_dup:
+                deduped.append(m)
+                used_times.append(m["start"])
+        if len(deduped) < len(meetings):
+            print(f"  Deduped: {len(meetings)} -> {len(deduped)} ({len(meetings)-len(deduped)} Calendly duplicates removed)")
+        meetings = deduped
 
     matches = match(transcripts, meetings) if meetings else [
         {"transcript": t, "meeting": None, "delta_mins": None,
@@ -960,8 +1101,12 @@ def run_person(person, hs_key, gemini_key, slack_url,
             })
         time.sleep(2)
 
+    if person.get("intel_active") and prompt_intel:
+        run_company_intel(name, meetings, hs_key, gemini_key, slack_intel,
+                          prompt_intel, drive_service)
+
     return {"name": name, "status": "ok", "matched": len(matches),
-            "summarized": summarized, "summaries_log": summaries_log},            processed_file_id, review_csv_file_id
+            "summarized": summarized, "summaries_log": summaries_log}, processed_file_id, review_csv_file_id
 
 
 # ---------------------------------------------------------------------------
@@ -979,9 +1124,10 @@ def main():
     print("=" * 70)
 
     print("\nLoading secrets...")
-    hs_key     = get_secret(SECRET_HS_KEY)
-    gemini_key = get_secret(SECRET_GEMINI)
-    slack_url  = get_secret(SECRET_SLACK)
+    hs_key      = get_secret(SECRET_HS_KEY)
+    gemini_key  = get_secret(SECRET_GEMINI)
+    slack_url   = get_secret(SECRET_SLACK)
+    slack_intel = get_secret(SECRET_SLACK_INTEL)
     if not hs_key or not gemini_key:
         print("⛔  Missing HS or Gemini key.")
         sys.exit(1)
@@ -999,6 +1145,7 @@ def main():
     prompt_mgmt        = load_prompt(drive_service, "prompt_sales_mgmt.txt")
     prompt_competitive = load_prompt(drive_service, "prompt_competitive.txt")
     prompt_roadmap     = load_prompt(drive_service, "prompt_roadmap.txt")
+    prompt_intel       = load_prompt(drive_service, "prompt_company_intel.txt")
 
     if not prompt_hs or not prompt_mgmt:
         print("⛔  Missing core prompt files.")
@@ -1028,8 +1175,8 @@ def main():
     results = []
     for person in salespeople:
         result, processed_file_id, review_csv_file_id = run_person(
-            person, hs_key, gemini_key, slack_url,
-            prompt_hs, prompt_mgmt, prompt_competitive, prompt_roadmap,
+            person, hs_key, gemini_key, slack_url, slack_intel,
+            prompt_hs, prompt_mgmt, prompt_competitive, prompt_roadmap, prompt_intel,
             all_owners, processed, processed_file_id, review_csv_file_id,
             drive_service,
             lookback_hours=lookback_hours, lookback_days=lookback_days
