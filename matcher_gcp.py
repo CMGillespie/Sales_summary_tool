@@ -173,13 +173,15 @@ def load_salespeople(service):
     people  = []
     reader  = csv.DictReader(io.StringIO(content))
     for row in reader:
-        active = row.get("active", "true").strip().lower()
-        if active not in ("true", "1", "yes"):
+        active       = row.get("active", "false").strip().lower() in ("true","1","yes")
+        intel_active = row.get("HS_company_intel_active", "false").strip().lower() in ("true","1","yes")
+        if not active and not intel_active:
             continue
         people.append({
             "name":         row.get("name", "").strip(),
             "email":        row.get("email", "").strip().lower(),
-            "intel_active": row.get("HS_company_intel_active", "false").strip().lower() in ("true","1","yes")
+            "active":       active,
+            "intel_active": intel_active
         })
     print(f"  ✅  Loaded {len(people)} active salespeople")
     return people
@@ -1157,7 +1159,8 @@ def main():
     # Load review CSV file ID
     review_csv_file_id = drive_find_file(drive_service, REVIEW_CSV_FILENAME, GDRIVE_SRC_FOLDER_ID)
 
-    salespeople_all = salespeople[:]  # keep full list for intel
+    salespeople_all = salespeople[:]
+    salespeople = [p for p in salespeople if p.get("active")]
     if TARGET_REP:
         salespeople = [p for p in salespeople
                        if p["name"].lower() == TARGET_REP.lower()]
