@@ -62,6 +62,14 @@ HIGH_THRESHOLD     = 6
 MIN_DURATION_MINS  = 5
 HS_PORTAL_ID       = "5315820"
 
+WCS_OBJECT_TYPE_ID = "2-68535024"
+WCS_ASSOC_CONTACT  = 349
+WCS_ASSOC_COMPANY  = 345
+
+WCS_OBJECT_TYPE_ID = "2-68535024"   # Wordly Call Summary custom object
+WCS_ASSOC_CONTACT  = 349            # association type: WCS → contact
+WCS_ASSOC_COMPANY  = 345            # association type: WCS → company
+
 PROCESSED_FILENAME    = "processed_log.json"
 REVIEW_CSV_FILENAME   = "management_review.csv"
 SALESPEOPLE_FILENAME  = "salespeople.csv"
@@ -414,6 +422,117 @@ def run_company_intel(rep_name, meetings, hs_key, gemini_key, slack_intel,
 
 
 
+def extract_call_type_value(hs_summary):
+    """Map call type text to dropdown value for custom object."""
+    text = hs_summary[:500].lower()
+    if "discovery" in text or "intro" in text:
+        return "discovery_demo"
+    if "demo" in text:
+        return "discovery_demo"
+    if "follow" in text:
+        return "follow_up"
+    if "proposal" in text or "pricing" in text:
+        return "proposal_pricing"
+    if "closing" in text:
+        return "closing"
+    if "exploratory" in text:
+        return "exploratory"
+    return "other"
+
+
+def extract_event_format(hs_summary):
+    text = hs_summary.lower()
+    if "in-person" in text or "in person" in text:
+        return "in_person"
+    if "hybrid" in text:
+        return "hybrid"
+    if "virtual" in text or "online" in text or "zoom" in text or "teams" in text:
+        return "virtual"
+    return "not_stated"
+
+
+def extract_platform(hs_summary):
+    text = hs_summary.lower()
+    if "teams" in text:
+        return "teams"
+    if "zoom" in text:
+        return "zoom"
+    if "google meet" in text:
+        return "google_meet"
+    if "webex" in text:
+        return "webex"
+    if "goto" in text or "go to" in text:
+        return "goto"
+    return "not_stated"
+
+
+def extract_urgency(hs_summary):
+    text = hs_summary.lower()
+    if "tomorrow" in text or "today" in text:
+        return "tomorrow"
+    if "this week" in text:
+        return "this_week"
+    if "this month" in text:
+        return "this_month"
+    if "this quarter" in text or "q1" in text or "q2" in text or "q3" in text or "q4" in text:
+        return "this_quarter"
+    return "not_stated"
+
+
+def extract_call_type_value(hs_summary):
+    text = hs_summary[:500].lower()
+    if "follow" in text:
+        return "follow_up"
+    if "proposal" in text or "pricing" in text:
+        return "proposal_pricing"
+    if "closing" in text:
+        return "closing"
+    if "exploratory" in text:
+        return "exploratory"
+    if "discovery" in text or "demo" in text or "intro" in text:
+        return "discovery_demo"
+    return "other"
+
+
+def extract_event_format(hs_summary):
+    text = hs_summary.lower()
+    if "hybrid" in text:
+        return "hybrid"
+    if "in-person" in text or "in person" in text:
+        return "in_person"
+    if "virtual" in text or "zoom" in text or "teams" in text or "online" in text:
+        return "virtual"
+    return "not_stated"
+
+
+def extract_platform(hs_summary):
+    text = hs_summary.lower()
+    if "teams" in text:
+        return "teams"
+    if "zoom" in text:
+        return "zoom"
+    if "google meet" in text:
+        return "google_meet"
+    if "webex" in text:
+        return "webex"
+    if "goto" in text:
+        return "goto"
+    return "not_stated"
+
+
+def extract_urgency(hs_summary):
+    text = hs_summary.lower()
+    if "tomorrow" in text or "today" in text:
+        return "tomorrow"
+    if "this week" in text:
+        return "this_week"
+    if "this month" in text:
+        return "this_month"
+    if "this quarter" in text or "q1" in text or "q2" in text or "q3" in text or "q4" in text:
+        return "this_quarter"
+    return "not_stated"
+
+
 def extract_call_type_abbrev(hs_summary):
     """Extract call type from HS summary and return short code."""
     mapping = {
@@ -598,6 +717,104 @@ def get_meeting_details(hs_key, meeting_id):
         print(f"    ⚠️  Meeting details error: {e}")
 
     return result
+
+
+def write_wcs_record(hs_key, fields, contact_id, company_id=None):
+    """Create a Wordly Call Summary custom object record and associate it."""
+    headers = {"Authorization": f"Bearer {hs_key}", "Content-Type": "application/json"}
+
+    # Convert date strings to midnight UTC milliseconds
+    import datetime as dt_module
+    props = {}
+    date_fields = {"call_date", "event_date_wcs"}
+    for k, v in fields.items():
+        if v is None:
+            continue
+        if k in date_fields and isinstance(v, str) and len(v) == 10:
+            try:
+                d = dt_module.datetime.strptime(v, "%Y-%m-%d")
+                props[k] = int(d.replace(tzinfo=dt_module.timezone.utc).timestamp() * 1000)
+            except:
+                props[k] = v
+        elif isinstance(v, bool):
+            props[k] = str(v).lower()
+        else:
+            props[k] = v
+
+    res = requests.post(
+        f"{HS_BASE_URL}/crm/v3/objects/{WCS_OBJECT_TYPE_ID}",
+        headers=headers,
+        json={"properties": props},
+        timeout=15
+    )
+    if res.status_code not in (200, 201):
+        print(f"    ⚠️  WCS record failed: {res.status_code} {res.text[:200]}")
+        return None
+
+    record_id = res.json().get("id")
+
+    # Associate to contact
+    if contact_id:
+        requests.put(
+            f"{HS_BASE_URL}/crm/v4/objects/{WCS_OBJECT_TYPE_ID}/{record_id}"
+            f"/associations/default/contacts/{contact_id}",
+            headers=headers, timeout=10)
+
+    # Associate to company
+    if company_id:
+        requests.put(
+            f"{HS_BASE_URL}/crm/v4/objects/{WCS_OBJECT_TYPE_ID}/{record_id}"
+            f"/associations/default/companies/{company_id}",
+            headers=headers, timeout=10)
+
+    return record_id
+
+
+def write_wcs_record(hs_key, fields, contact_id, company_id=None):
+    """Create a Wordly Call Summary custom object record and associate it."""
+    import datetime as dt_module
+    headers = {"Authorization": f"Bearer {hs_key}", "Content-Type": "application/json"}
+    props = {}
+    date_fields = {"call_date", "event_date_wcs"}
+    for k, v in fields.items():
+        if v is None:
+            continue
+        if k in date_fields and isinstance(v, str) and len(v) == 10:
+            try:
+                d = dt_module.datetime.strptime(v, "%Y-%m-%d")
+                props[k] = int(d.replace(tzinfo=dt_module.timezone.utc).timestamp() * 1000)
+            except:
+                props[k] = v
+        elif isinstance(v, bool):
+            props[k] = str(v).lower()
+        else:
+            props[k] = v
+
+    res = requests.post(
+        f"{HS_BASE_URL}/crm/v3/objects/{WCS_OBJECT_TYPE_ID}",
+        headers=headers,
+        json={"properties": props},
+        timeout=15
+    )
+    if res.status_code not in (200, 201):
+        print(f"    WCS record failed: {res.status_code} {res.text[:200]}")
+        return None
+
+    record_id = res.json().get("id")
+
+    if contact_id:
+        requests.put(
+            f"{HS_BASE_URL}/crm/v4/objects/{WCS_OBJECT_TYPE_ID}/{record_id}"
+            f"/associations/default/contacts/{contact_id}",
+            headers=headers, timeout=10)
+
+    if company_id:
+        requests.put(
+            f"{HS_BASE_URL}/crm/v4/objects/{WCS_OBJECT_TYPE_ID}/{record_id}"
+            f"/associations/default/companies/{company_id}",
+            headers=headers, timeout=10)
+
+    return record_id
 
 
 def write_hs_note(hs_key, contact_id, note_body, company_id=None):
@@ -901,10 +1118,40 @@ def summarize_match(r, person_name, hs_key, gemini_key,
               f"Date: {m_start} | HS ID: {m_hs_id or 'UNMATCHED'}")
 
     note_id = None
+    wcs_id  = None
     if contact_id and ok_hs:
         print(f"    Writing to HubSpot...", end=" ", flush=True)
         note_id = write_hs_note(hs_key, contact_id, hs_note_body, company_id=details.get("company_id"))
         print(f"✅  Note {note_id}" if note_id else "❌")
+
+        # Write structured record to Wordly Call Summary custom object
+        wcs_fields = {
+            "call_date":          date_str,
+            "call_time":          time_str + " UTC",
+            "rep_name":           person_name,
+            "call_type":          extract_call_type_value(hs_summary),
+            "deal_health":        int(grade) if grade else None,
+            "deal_health_reason": None,
+            "competitors_mentioned": extract_competitors(hs_summary),
+            "deal_urgency":       extract_urgency(hs_summary),
+            "what_brought_them":  None,
+            "event_format_wcs":   extract_event_format(hs_summary),
+            "platform_wcs":       extract_platform(hs_summary),
+            "languages_needed":   details.get("languages"),
+            "audience_size":      details.get("audience_size"),
+            "hours_needed":       details.get("hours_needed"),
+            "customer_type_wcs":  "direct",
+            "pain_points":        None,
+            "next_steps":         None,
+            "meeting_summary":    hs_summary[:2000] if ok_hs else None,
+            "internal_referral":  "false",
+            "audit_grade":        grade,
+            "wordly_meeting_id":  m_hs_id or "",
+            "wordly_transcript_id": t_id,
+        }
+        print(f"    Writing custom object...", end=" ", flush=True)
+        wcs_id = write_wcs_record(hs_key, wcs_fields, contact_id, details.get("company_id"))
+        print(f"✅  WCS {wcs_id}" if wcs_id else "❌")
     time.sleep(2)
 
     # --- Sales Audit ---
