@@ -378,7 +378,7 @@ def run_company_intel(rep_name, meetings, hs_key, gemini_key, slack_intel,
         return
     seen_companies = set()
     for m in meetings[:5]:
-        contact_id, customer_info = get_meeting_contact(hs_key, m["hs_id"]) if m.get("hs_id") else (None, None)
+        contact_id, customer_info = get_meeting_details(hs_key, m["hs_id"]) if m.get("hs_id") else (None, None)
         if not customer_info:
             continue
         company_name = customer_info.get("company", "") if isinstance(customer_info, dict) else ""
