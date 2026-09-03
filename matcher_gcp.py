@@ -1130,7 +1130,7 @@ def summarize_match(r, person_name, hs_key, gemini_key,
             "call_time":          time_str + " UTC",
             "rep_name":           person_name,
             "call_type":          extract_call_type_value(hs_summary),
-            "deal_health":        int(grade) if grade else None,
+            "deal_health":        None,  # set after audit
             "deal_health_reason": None,
             "competitors_mentioned": extract_competitors(hs_summary),
             "deal_urgency":       extract_urgency(hs_summary),
@@ -1145,7 +1145,7 @@ def summarize_match(r, person_name, hs_key, gemini_key,
             "next_steps":         None,
             "meeting_summary":    hs_summary[:2000] if ok_hs else None,
             "internal_referral":  "false",
-            "audit_grade":        grade,
+            "audit_grade":        None,  # set after audit
             "wordly_meeting_id":  m_hs_id or "",
             "wordly_transcript_id": t_id,
         }
