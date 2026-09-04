@@ -54,7 +54,7 @@ GEMINI_URL       = "https://generativelanguage.googleapis.com/v1beta/models/gemi
 
 TARGET_REP       = None
 LOOKBACK_HOURS   = 2
-BACKFILL_DAYS    = 10
+BACKFILL_DAYS    = 1
 IS_BACKFILL      = os.environ.get("IS_BACKFILL", "false").lower() == "true"
 
 MATCH_WINDOW_MINS  = 15
