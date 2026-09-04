@@ -378,17 +378,19 @@ def run_company_intel(rep_name, meetings, hs_key, gemini_key, slack_intel,
         return
     seen_companies = set()
     for m in meetings[:5]:
-        contact_id, customer_info, _extra = get_meeting_details(hs_key, m["hs_id"]) if m.get("hs_id") else (None, None, None)
+        _details = get_meeting_details(hs_key, m["hs_id"]) if m.get("hs_id") else {}
+        contact_id = _details.get("contact_id") if _details else None
+        customer_info = _details if _details else None
         if not customer_info:
             continue
-        company_name = customer_info.get("company", "") if isinstance(customer_info, dict) else ""
+        company_name = customer_info.get("company_name", "") if isinstance(customer_info, dict) else ""
         company_id   = customer_info.get("company_id", "") if isinstance(customer_info, dict) else ""
         if not company_name or company_name in seen_companies:
             continue
         seen_companies.add(company_name)
         all_contacts = get_company_contacts(hs_key, company_id) if company_id else []
         deals        = get_company_deals(hs_key, company_id) if company_id else []
-        hs_context   = f"Contact: {customer_info.get('name','?')} | {customer_info.get('title','?')}"
+        hs_context   = f"Contact: {customer_info.get('customer_name','?')} | {customer_info.get('customer_title','?')}"
         hs_context  += f"\nCompany: {company_name}"
         if deals:
             for d in deals[:3]:
