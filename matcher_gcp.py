@@ -1477,7 +1477,7 @@ def main():
             if not owner_id:
                 continue
             # Intel looks FORWARD 48 hours — upcoming meetings only
-            from datetime import datetime, timezone, timedelta as td
+            from datetime import timedelta as td
             now_utc = datetime.now(timezone.utc)
             intel_since_ms = int((now_utc - td(hours=1)).timestamp() * 1000)
             intel_until_ms = int((now_utc + td(hours=48)).timestamp() * 1000)
