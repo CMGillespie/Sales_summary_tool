@@ -719,6 +719,20 @@ def get_meeting_details(hs_key, meeting_id):
     return result
 
 
+def get_all_meeting_contacts(hs_key, meeting_id):
+    """Return list of all contact IDs associated with a HubSpot meeting."""
+    headers = {"Authorization": f"Bearer {hs_key}"}
+    try:
+        res = requests.get(
+            f"{HS_BASE_URL}/crm/v3/objects/meetings/{meeting_id}/associations/contacts",
+            headers=headers, timeout=10)
+        if res.status_code == 200:
+            return [r["id"] for r in res.json().get("results", [])]
+    except:
+        pass
+    return []
+
+
 def write_wcs_record(hs_key, fields, contact_id, company_id=None):
     """Create a Wordly Call Summary custom object record and associate it."""
     headers = {"Authorization": f"Bearer {hs_key}", "Content-Type": "application/json"}
@@ -768,6 +782,20 @@ def write_wcs_record(hs_key, fields, contact_id, company_id=None):
             headers=headers, timeout=10)
 
     return record_id
+
+
+def get_all_meeting_contacts(hs_key, meeting_id):
+    """Return list of all contact IDs associated with a HubSpot meeting."""
+    headers = {"Authorization": f"Bearer {hs_key}"}
+    try:
+        res = requests.get(
+            f"{HS_BASE_URL}/crm/v3/objects/meetings/{meeting_id}/associations/contacts",
+            headers=headers, timeout=10)
+        if res.status_code == 200:
+            return [r["id"] for r in res.json().get("results", [])]
+    except:
+        pass
+    return []
 
 
 def write_wcs_record(hs_key, fields, contact_id, company_id=None):
@@ -1119,39 +1147,6 @@ def summarize_match(r, person_name, hs_key, gemini_key,
 
     note_id = None
     wcs_id  = None
-    if contact_id and ok_hs:
-        print(f"    Writing to HubSpot...", end=" ", flush=True)
-        note_id = write_hs_note(hs_key, contact_id, hs_note_body, company_id=details.get("company_id"))
-        print(f"✅  Note {note_id}" if note_id else "❌")
-
-        # Write structured record to Wordly Call Summary custom object
-        wcs_fields = {
-            "call_date":          date_str,
-            "call_time":          time_str + " UTC",
-            "rep_name":           person_name,
-            "call_type":          extract_call_type_value(hs_summary),
-            "deal_health":        None,  # set after audit
-            "deal_health_reason": None,
-            "competitors_mentioned": extract_competitors(hs_summary),
-            "deal_urgency":       extract_urgency(hs_summary),
-            "what_brought_them":  None,
-            "event_format_wcs":   extract_event_format(hs_summary),
-            "platform_wcs":       extract_platform(hs_summary),
-            "languages_needed":   details.get("languages"),
-            "audience_size":      details.get("audience_size"),
-            "hours_needed":       details.get("hours_needed"),
-            "customer_type_wcs":  "direct",
-            "pain_points":        None,
-            "next_steps":         None,
-            "meeting_summary":    hs_summary[:2000] if ok_hs else None,
-            "internal_referral":  "false",
-            "audit_grade":        None,  # set after audit
-            "wordly_meeting_id":  m_hs_id or "",
-            "wordly_transcript_id": t_id,
-        }
-        print(f"    Writing custom object...", end=" ", flush=True)
-        wcs_id = write_wcs_record(hs_key, wcs_fields, contact_id, details.get("company_id"))
-        print(f"✅  WCS {wcs_id}" if wcs_id else "❌")
     time.sleep(2)
 
     # --- Sales Audit ---
@@ -1167,6 +1162,41 @@ def summarize_match(r, person_name, hs_key, gemini_key,
               f"Salesperson: {person_name} | Customer: {customer_name}\n"
               f"Company: {company_name} | Date: {m_start}")
     time.sleep(2)
+
+    # Write WCS record after audit so grade is available
+    if contact_id and ok_hs:
+        nd = "Not Discussed"
+        wcs_fields = {
+            "call_date":             date_str,
+            "call_time":             time_str + " UTC",
+            "rep_name":              person_name,
+            "call_type":             extract_call_type_value(hs_summary),
+            "deal_health":           grade,
+            "competitors_mentioned": extract_competitors(hs_summary) or nd,
+            "deal_urgency":          extract_urgency(hs_summary),
+            "event_format_wcs":      extract_event_format(hs_summary),
+            "platform_wcs":          extract_platform(hs_summary),
+            "languages_needed":      details.get("languages") or nd,
+            "audience_size":         details.get("audience_size"),
+            "hours_needed":          details.get("hours_needed"),
+            "customer_type_wcs":     "direct",
+            "meeting_summary":       hs_summary[:2000] if ok_hs else None,
+            "audit_grade":           grade,
+            "wordly_meeting_id":     m_hs_id or "",
+            "wordly_transcript_id":  t_id,
+        }
+        print(f"    Writing custom object...", end=" ", flush=True)
+        wcs_id = write_wcs_record(hs_key, wcs_fields, contact_id, details.get("company_id"))
+        print(f"OK  WCS {wcs_id}" if wcs_id else "FAIL wcs")
+
+        # Write note to secondary contacts on the meeting invite
+        if m_hs_id:
+            all_contact_ids = get_all_meeting_contacts(hs_key, m_hs_id)
+            secondary = [cid for cid in all_contact_ids if cid != contact_id]
+            if secondary:
+                print(f"    Writing note to {len(secondary)} secondary contact(s)...")
+                for sec_id in secondary:
+                    write_hs_note(hs_key, sec_id, hs_note_body)
 
     # --- Competitive Intel ---
     if prompt_competitive:
