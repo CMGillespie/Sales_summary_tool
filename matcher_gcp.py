@@ -53,7 +53,7 @@ HS_BASE_URL      = "https://api.hubapi.com"
 GEMINI_URL       = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
 TARGET_REP       = None
-LOOKBACK_HOURS   = 2
+LOOKBACK_HOURS   = 4
 BACKFILL_DAYS    = 1
 IS_BACKFILL      = os.environ.get("IS_BACKFILL", "false").lower() == "true"
 
@@ -1476,9 +1476,33 @@ def main():
             owner_id = owner.get("id") if owner else None
             if not owner_id:
                 continue
-            intel_meetings = pull_hs_meetings(hs_key, owner_id,
-                                              lookback_hours=lookback_hours,
-                                              lookback_days=lookback_days)
+            # Intel looks FORWARD 48 hours — upcoming meetings only
+            from datetime import datetime, timezone, timedelta as td
+            now_utc = datetime.now(timezone.utc)
+            intel_since_ms = int((now_utc - td(hours=1)).timestamp() * 1000)
+            intel_until_ms = int((now_utc + td(hours=48)).timestamp() * 1000)
+            intel_meetings = []
+            _res = requests.post(
+                f"{HS_BASE_URL}/crm/v3/objects/meetings/search",
+                headers={"Authorization": f"Bearer {hs_key}", "Content-Type": "application/json"},
+                json={
+                    "filterGroups": [{"filters": [
+                        {"propertyName": "hubspot_owner_id", "operator": "EQ", "value": str(owner_id)},
+                        {"propertyName": "hs_meeting_start_time", "operator": "GTE", "value": str(intel_since_ms)},
+                        {"propertyName": "hs_meeting_start_time", "operator": "LTE", "value": str(intel_until_ms)}
+                    ]}],
+                    "properties": ["hs_meeting_title", "hs_meeting_start_time"],
+                    "limit": 20
+                }, timeout=15)
+            if _res.status_code == 200:
+                for _m in _res.json().get("results", []):
+                    _p = _m.get("properties", {})
+                    _t = _p.get("hs_meeting_start_time", "")
+                    _title = _p.get("hs_meeting_title", "") or ""
+                    if "cancel" in _title.lower() or "Calendly" in _title:
+                        continue
+                    intel_meetings.append({"hs_id": _m["id"], "title": _title,
+                                           "start": _t, "start_str": _t})
             if intel_meetings:
                 run_company_intel(person["name"], intel_meetings, hs_key,
                                   gemini_key, slack_intel, prompt_intel, drive_service)
