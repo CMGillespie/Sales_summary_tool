@@ -388,6 +388,18 @@ def run_company_intel(rep_name, meetings, hs_key, gemini_key, slack_intel,
         if not company_name or company_name in seen_companies:
             continue
         seen_companies.add(company_name)
+
+        # Skip if intel file already generated today
+        date_str_intel = datetime.now().strftime("%Y-%m-%d")
+        safe_rep_intel  = safe_filename(rep_name.split()[0])
+        safe_co_intel   = safe_filename(company_name.replace(" ", "_"))[:40]
+        intel_filename  = f"{date_str_intel}_{safe_rep_intel}_{safe_co_intel}-Intel.txt"
+        rep_folder_check = drive_get_or_create_folder(
+            drive_service, safe_filename(rep_name), GDRIVE_INTEL_FOLDER_ID)
+        existing = drive_find_file(drive_service, intel_filename, rep_folder_check)
+        if existing:
+            print(f"  [Intel] Skipping {company_name} — already generated today")
+            continue
         all_contacts = get_company_contacts(hs_key, company_id) if company_id else []
         deals        = get_company_deals(hs_key, company_id) if company_id else []
         hs_context   = f"Contact: {customer_info.get('customer_name','?')} | {customer_info.get('customer_title','?')}"
