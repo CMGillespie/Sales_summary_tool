@@ -747,6 +747,47 @@ def get_all_meeting_contacts(hs_key, meeting_id):
     return []
 
 
+def extract_wcs_fields(hs_summary, gemini_key):
+    """Use Gemini to extract structured fields from the HS summary text."""
+    prompt = """Extract structured data from this sales call summary.
+Return ONLY a JSON object with these exact keys. No markdown, no explanation.
+If a field was not mentioned, use null.
+
+{
+  "call_type": "one of: discovery_demo | follow_up | proposal_pricing | closing | exploratory | other",
+  "deal_health": "integer 1-5 or null",
+  "deal_health_reason": "one line reason or null",
+  "competitors_mentioned": "comma-separated names or null",
+  "deal_urgency": "one of: tomorrow | this_week | this_month | this_quarter | this_year | next_year | other | not_stated",
+  "event_format_wcs": "one of: in_person | virtual | hybrid | not_stated",
+  "platform_wcs": "one of: teams | zoom | google_meet | webex | goto | in_person_only | other | not_stated",
+  "languages_needed": "text or null",
+  "audience_size": "integer or null",
+  "hours_needed": "integer or null",
+  "customer_type_wcs": "one of: direct | partner | reseller",
+  "internal_referral": "true or false",
+  "pain_points": "brief bullet list or null",
+  "next_steps": "brief bullet list or null",
+  "what_brought_them": "one or two sentences or null",
+  "event_date_wcs": "YYYY-MM-DD or null"
+}
+
+SUMMARY:
+""" + hs_summary[:3000]
+
+    try:
+        result = gemini_call(prompt, gemini_key)
+        # Strip markdown fences if present
+        result = result.strip()
+        if result.startswith("```"):
+            result = re.sub(r"```(?:json)?", "", result).strip().rstrip("```").strip()
+        import json
+        return json.loads(result)
+    except Exception as e:
+        print(f"    ⚠️  Field extraction failed: {e}")
+        return {}
+
+
 def write_wcs_record(hs_key, fields, contact_id, company_id=None):
     """Create a Wordly Call Summary custom object record and associate it."""
     headers = {"Authorization": f"Bearer {hs_key}", "Content-Type": "application/json"}
@@ -768,6 +809,10 @@ def write_wcs_record(hs_key, fields, contact_id, company_id=None):
             props[k] = str(v).lower()
         else:
             props[k] = v
+
+    # Use record_name as the HubSpot display name if provided
+    if "record_name" in props:
+        props["hs_object_name"] = props.pop("record_name")
 
     res = requests.post(
         f"{HS_BASE_URL}/crm/v3/objects/{WCS_OBJECT_TYPE_ID}",
@@ -812,6 +857,47 @@ def get_all_meeting_contacts(hs_key, meeting_id):
     return []
 
 
+def extract_wcs_fields(hs_summary, gemini_key):
+    """Use Gemini to extract structured fields from the HS summary text."""
+    prompt = """Extract structured data from this sales call summary.
+Return ONLY a JSON object with these exact keys. No markdown, no explanation.
+If a field was not mentioned, use null.
+
+{
+  "call_type": "one of: discovery_demo | follow_up | proposal_pricing | closing | exploratory | other",
+  "deal_health": "integer 1-5 or null",
+  "deal_health_reason": "one line reason or null",
+  "competitors_mentioned": "comma-separated names or null",
+  "deal_urgency": "one of: tomorrow | this_week | this_month | this_quarter | this_year | next_year | other | not_stated",
+  "event_format_wcs": "one of: in_person | virtual | hybrid | not_stated",
+  "platform_wcs": "one of: teams | zoom | google_meet | webex | goto | in_person_only | other | not_stated",
+  "languages_needed": "text or null",
+  "audience_size": "integer or null",
+  "hours_needed": "integer or null",
+  "customer_type_wcs": "one of: direct | partner | reseller",
+  "internal_referral": "true or false",
+  "pain_points": "brief bullet list or null",
+  "next_steps": "brief bullet list or null",
+  "what_brought_them": "one or two sentences or null",
+  "event_date_wcs": "YYYY-MM-DD or null"
+}
+
+SUMMARY:
+""" + hs_summary[:3000]
+
+    try:
+        result = gemini_call(prompt, gemini_key)
+        # Strip markdown fences if present
+        result = result.strip()
+        if result.startswith("```"):
+            result = re.sub(r"```(?:json)?", "", result).strip().rstrip("```").strip()
+        import json
+        return json.loads(result)
+    except Exception as e:
+        print(f"    ⚠️  Field extraction failed: {e}")
+        return {}
+
+
 def write_wcs_record(hs_key, fields, contact_id, company_id=None):
     """Create a Wordly Call Summary custom object record and associate it."""
     import datetime as dt_module
@@ -831,6 +917,10 @@ def write_wcs_record(hs_key, fields, contact_id, company_id=None):
             props[k] = str(v).lower()
         else:
             props[k] = v
+
+    # Use record_name as the HubSpot display name if provided
+    if "record_name" in props:
+        props["hs_object_name"] = props.pop("record_name")
 
     res = requests.post(
         f"{HS_BASE_URL}/crm/v3/objects/{WCS_OBJECT_TYPE_ID}",
@@ -1180,20 +1270,33 @@ def summarize_match(r, person_name, hs_key, gemini_key,
     # Write WCS record after audit so grade is available
     if contact_id and ok_hs:
         nd = "Not Discussed"
+        print(f"    Extracting structured fields...", end=" ", flush=True)
+        extracted = extract_wcs_fields(hs_summary, gemini_key) if ok_hs else {}
+        print("OK" if extracted else "used defaults")
+
+        # Record name: date + rep + company
+        record_name = f"{date_str} — {person_name.split()[0]} & {company_name}"
+
         wcs_fields = {
+            "record_name":           record_name,
             "call_date":             date_str,
             "call_time":             time_str + " UTC",
             "rep_name":              person_name,
-            "call_type":             extract_call_type_value(hs_summary),
-            "deal_health":           grade,
-            "competitors_mentioned": extract_competitors(hs_summary) or nd,
-            "deal_urgency":          extract_urgency(hs_summary),
-            "event_format_wcs":      extract_event_format(hs_summary),
-            "platform_wcs":          extract_platform(hs_summary),
-            "languages_needed":      details.get("languages") or nd,
-            "audience_size":         details.get("audience_size"),
-            "hours_needed":          details.get("hours_needed"),
-            "customer_type_wcs":     "direct",
+            "call_type":             extracted.get("call_type") or extract_call_type_value(hs_summary),
+            "deal_health":           extracted.get("deal_health") or grade,
+            "deal_health_reason":    extracted.get("deal_health_reason"),
+            "competitors_mentioned": extracted.get("competitors_mentioned") or nd,
+            "deal_urgency":          extracted.get("deal_urgency") or extract_urgency(hs_summary),
+            "what_brought_them":     extracted.get("what_brought_them"),
+            "event_format_wcs":      extracted.get("event_format_wcs") or extract_event_format(hs_summary),
+            "platform_wcs":          extracted.get("platform_wcs") or extract_platform(hs_summary),
+            "languages_needed":      extracted.get("languages_needed") or details.get("languages") or nd,
+            "audience_size":         extracted.get("audience_size") or details.get("audience_size"),
+            "hours_needed":          extracted.get("hours_needed") or details.get("hours_needed"),
+            "customer_type_wcs":     extracted.get("customer_type_wcs") or "direct",
+            "internal_referral":     extracted.get("internal_referral", "false"),
+            "pain_points":           extracted.get("pain_points"),
+            "next_steps":            extracted.get("next_steps"),
             "meeting_summary":       hs_summary[:2000] if ok_hs else None,
             "audit_grade":           grade,
             "wordly_meeting_id":     m_hs_id or "",
