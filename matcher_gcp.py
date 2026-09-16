@@ -105,15 +105,23 @@ def get_drive_service():
     return build("drive", "v3", credentials=creds)
 
 
-def drive_find_file(service, filename, parent_id):
-    query   = f"name='{filename}' and '{parent_id}' in parents and trashed=false"
-    results = service.files().list(
-        q=query, fields="files(id, name)",
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True
-    ).execute()
-    files = results.get("files", [])
-    return files[0]["id"] if files else None
+def drive_find_file(service, filename, parent_id, retries=3):
+    import time as _time
+    query = f"name='{filename}' and '{parent_id}' in parents and trashed=false"
+    for attempt in range(retries):
+        try:
+            results = service.files().list(
+                q=query, fields="files(id, name)",
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True
+            ).execute()
+            files = results.get("files", [])
+            return files[0]["id"] if files else None
+        except Exception as e:
+            if "429" in str(e) and attempt < retries - 1:
+                _time.sleep(2 ** attempt)
+                continue
+            return None
 
 
 def drive_read_text(service, file_id):
@@ -810,9 +818,8 @@ def write_wcs_record(hs_key, fields, contact_id, company_id=None):
         else:
             props[k] = v
 
-    # Use record_name as the HubSpot display name if provided
-    if "record_name" in props:
-        props["hs_object_name"] = props.pop("record_name")
+    # Remove record_name — not a valid HS property
+    props.pop("record_name", None)
 
     res = requests.post(
         f"{HS_BASE_URL}/crm/v3/objects/{WCS_OBJECT_TYPE_ID}",
@@ -918,9 +925,8 @@ def write_wcs_record(hs_key, fields, contact_id, company_id=None):
         else:
             props[k] = v
 
-    # Use record_name as the HubSpot display name if provided
-    if "record_name" in props:
-        props["hs_object_name"] = props.pop("record_name")
+    # Remove record_name — not a valid HS property
+    props.pop("record_name", None)
 
     res = requests.post(
         f"{HS_BASE_URL}/crm/v3/objects/{WCS_OBJECT_TYPE_ID}",
@@ -1273,6 +1279,13 @@ def summarize_match(r, person_name, hs_key, gemini_key,
         print(f"    Extracting structured fields...", end=" ", flush=True)
         extracted = extract_wcs_fields(hs_summary, gemini_key) if ok_hs else {}
         print("OK" if extracted else "used defaults")
+        # Force all extracted values to scalar — Gemini sometimes returns lists
+        for k in list(extracted.keys()):
+            v = extracted[k]
+            if isinstance(v, list):
+                extracted[k] = ", ".join(str(i) for i in v) if v else None
+            elif isinstance(v, dict):
+                extracted[k] = str(v)
 
         # Record name: date + rep + company
         record_name = f"{date_str} — {person_name.split()[0]} & {company_name}"
