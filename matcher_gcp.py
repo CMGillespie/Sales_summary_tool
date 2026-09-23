@@ -1288,10 +1288,10 @@ def summarize_match(r, person_name, hs_key, gemini_key,
                 extracted[k] = str(v)
 
         # Record name: date + rep + company
-        record_name = f"{date_str} — {person_name.split()[0]} & {company_name}"
+        call_title = f"{person_name} & {customer_name}"
 
         wcs_fields = {
-            "record_name":           record_name,
+            "call_title":            call_title,
             "call_date":             date_str,
             "call_time":             time_str + " UTC",
             "rep_name":              person_name,
@@ -1312,6 +1312,7 @@ def summarize_match(r, person_name, hs_key, gemini_key,
             "next_steps":            extracted.get("next_steps"),
             "meeting_summary":       hs_summary[:2000] if ok_hs else None,
             "audit_grade":           grade,
+            "audit_details":         mgmt_summary[:5000] if ok_audit else None,
             "wordly_meeting_id":     m_hs_id or "",
             "wordly_transcript_id":  t_id,
         }
@@ -1634,6 +1635,20 @@ def main():
             if intel_meetings:
                 run_company_intel(person["name"], intel_meetings, hs_key,
                                   gemini_key, slack_intel, prompt_intel, drive_service)
+
+    if slack_url and not IS_BACKFILL:
+        try:
+            all_hs_owners = fetch_all_owners(hs_key)
+            csv_emails = {p["email"].lower() for p in salespeople_all}
+            exclusions = {"kirk@wordly.ai","vipul.vyas@wordly.ai","chris.gillespie@wordly.ai"}
+            for owner in all_hs_owners:
+                email = owner.get("email","").lower()
+                if not email or not email.endswith("@wordly.ai") or email in exclusions:
+                    continue
+                if email not in csv_emails:
+                    requests.post(slack_url, json={"text": f"⚠️ HubSpot owner not in salespeople.csv: `{owner.get('firstName','')} {owner.get('lastName','')}` ({email})"}, timeout=10)
+        except Exception as e:
+            print(f"  Missing rep check failed: {e}")
 
     section("PIPELINE COMPLETE")
     total = sum(r.get("summarized", 0) for r in results)
