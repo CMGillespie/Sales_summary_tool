@@ -1636,11 +1636,25 @@ def main():
                 run_company_intel(person["name"], intel_meetings, hs_key,
                                   gemini_key, slack_intel, prompt_intel, drive_service)
 
-    if slack_url and not IS_BACKFILL:
+    if slack_url and not IS_BACKFILL and datetime.now().weekday() == 1:
         try:
             all_hs_owners = fetch_all_owners(hs_key)
             csv_emails = {p["email"].lower() for p in salespeople_all}
-            exclusions = {"kirk@wordly.ai","vipul.vyas@wordly.ai","chris.gillespie@wordly.ai"}
+            exclusions = {
+                "kirk@wordly.ai", "vipul.vyas@wordly.ai", "chris.gillespie@wordly.ai",
+                "marketing@wordly.ai", "newsletter@wordly.ai", "support@wordly.ai",
+                "new-account@wordly.ai", "accounts@wordly.ai", "jill.czarnik@wordly.ai",
+                "tyler.jeffrey@wordly.ai", "hayley.inkster@wordly.ai", "joao.garcia@wordly.ai",
+                "chris.harget@wordly.ai", "lang@wordly.ai", "justin.cepelak@wordly.ai",
+                "heather.hadley@wordly.ai", "chris.brophy@wordly.ai", "evie.parton@wordly.ai",
+                "graham.herrli@wordly.ai", "katie.greathouse@wordly.ai", "diamone.floyd@wordly.ai",
+                "jan.colson@wordly.ai", "nidhi.kapur@wordly.ai", "shereen.perillat@wordly.ai",
+                "aki.hayashi@wordly.ai", "yorihito.hashimoto@wordly.ai", "lakshman@wordly.ai",
+                "nicole.bertrand-haydari@wordly.ai", "amy.worboys@wordly.ai",
+                "anastasia.gileva@wordly.ai", "shannon.long@wordly.ai", "dave.deasy@wordly.ai",
+                "eric.paterson@wordly.ai", "scott.mceachen@wordly.ai", "molly.daft@wordly.ai",
+                "wordly_apps@wordly.ai"
+            }
             for owner in all_hs_owners:
                 email = owner.get("email","").lower()
                 if not email or not email.endswith("@wordly.ai") or email in exclusions:
