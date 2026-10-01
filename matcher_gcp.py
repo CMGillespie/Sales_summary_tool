@@ -1516,7 +1516,15 @@ def run_person(person, hs_key, gemini_key, slack_url, slack_intel,
                           prompt_intel, drive_service)
 
     return {"name": name, "status": "ok", "matched": len(matches),
-            "summarized": summarized, "summaries_log": summaries_log}, processed_file_id, review_csv_file_id
+            "summarized": summarized, "summaries_log": summaries_log,
+            "missed": [
+                {"meeting": r["meeting"]["title"][:50], "time": r["meeting"]["start"].strftime("%H:%M UTC") if r["meeting"]["start"] else "?", "reason": "NO_TRANSCRIPT"}
+                for r in matches if r["confidence"] == "NONE" and r["meeting"]
+            ] + [
+                {"meeting": r["meeting"]["title"][:50], "time": r["meeting"]["start"].strftime("%H:%M UTC") if r["meeting"]["start"] else "?", "reason": "OUTSIDE_WINDOW"}
+                for r in matches if r["confidence"] == "LOW" and r["meeting"]
+            ]
+        }, processed_file_id, review_csv_file_id
 
 
 # ---------------------------------------------------------------------------
@@ -1666,6 +1674,34 @@ def main():
 
     section("PIPELINE COMPLETE")
     total = sum(r.get("summarized", 0) for r in results)
+
+    # Daily missed summaries digest — fires once at 5 PM PST (01:00 UTC)
+    now_utc = datetime.now(timezone.utc)
+    if slack_url and not IS_BACKFILL and now_utc.hour == 1:
+        try:
+            total_matched    = sum(r.get("matched", 0) for r in results)
+            total_summarized = sum(r.get("summarized", 0) for r in results)
+            total_missed     = sum(len(r.get("missed", [])) for r in results)
+
+            lines = ["📊 *Daily Sales Pipeline Report*"]
+            lines.append(f"Meetings matched: {total_matched} | Summarized: {total_summarized} | Missed: {total_missed}")
+            lines.append("")
+
+            has_misses = False
+            for r in results:
+                missed = r.get("missed", [])
+                if missed:
+                    has_misses = True
+                    lines.append(f"*{r['name']}* — {len(missed)} missed:")
+                    for m in missed:
+                        lines.append(f"  • {m['time']} | {m['meeting']} | `{m['reason']}`")
+
+            if not has_misses:
+                lines.append("✅ No missed meetings today.")
+
+            requests.post(slack_url, json={"text": "\n".join(lines)}, timeout=10)
+        except Exception as e:
+            print(f"  Daily digest failed: {e}")
     print(f"\n  {'Name':<30} {'Status':<15} {'Matched':>8} {'Summarized':>12}")
     print(f"  {'-'*30} {'-'*15} {'-'*8} {'-'*12}")
     for r in results:
@@ -1673,16 +1709,9 @@ def main():
               f"{r.get('matched',0):>8} {r.get('summarized',0):>12}")
     print(f"\n  Total summaries: {total}")
 
-    # End-of-run Slack digest — only if new summaries were generated
-    if total > 0 and not IS_BACKFILL:
-        lines = [f"📋 *Sales Pipeline — {total} new summary/summaries*"]
-        for r in results:
-            if r.get("summarized", 0) > 0:
-                lines.append(f"\n*{r['name']}* — {r['summarized']} call(s):")
-                for s in r.get("summaries_log", []):
-                    grade = s.get("grade", "X")
-                    lines.append(f"  • {s.get('date_disp','')} | {s.get('company','')} | {s.get('call_type','')} | Grade: {grade}/5")
-        slack_notify(slack_url, "\n".join(lines))
+    # Slack: only fire end-of-run digest if there were errors
+    # (per-summary notifications removed — errors handled inline)
+    pass
 
     print()
 
