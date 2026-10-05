@@ -1679,13 +1679,28 @@ def main():
     now_utc = datetime.now(timezone.utc)
     if slack_url and not IS_BACKFILL and now_utc.hour == 1:
         try:
-            total_matched    = sum(r.get("matched", 0) for r in results)
-            total_summarized = sum(r.get("summarized", 0) for r in results)
-            total_missed     = sum(len(r.get("missed", [])) for r in results)
+            # Use yesterday UTC date — calls processed during business hours land there
+            yesterday_str = (now_utc - timedelta(hours=24)).strftime("%Y-%m-%d")
+            today_str     = now_utc.strftime("%Y-%m-%d")
+            day_entries   = {k: v for k, v in processed.items()
+                             if v.get("date","") in (today_str, yesterday_str)}
+            total_summarized = len(day_entries)
+            by_rep = {}
+            for v in day_entries.values():
+                rep = v.get("rep","Unknown")
+                by_rep[rep] = by_rep.get(rep, 0) + 1
+
+            total_missed = sum(len(r.get("missed", [])) for r in results)
 
             lines = ["📊 *Daily Sales Pipeline Report*"]
-            lines.append(f"Meetings matched: {total_matched} | Summarized: {total_summarized} | Missed: {total_missed}")
+            lines.append(f"Summarized today: {total_summarized} | Missed this run: {total_missed}")
             lines.append("")
+
+            if by_rep:
+                lines.append("*Summaries by rep:*")
+                for rep, count in sorted(by_rep.items()):
+                    lines.append(f"  • {rep}: {count}")
+                lines.append("")
 
             has_misses = False
             for r in results:
@@ -1697,7 +1712,7 @@ def main():
                         lines.append(f"  • {m['time']} | {m['meeting']} | `{m['reason']}`")
 
             if not has_misses:
-                lines.append("✅ No missed meetings today.")
+                lines.append("✅ No missed meetings in final run.")
 
             requests.post(slack_url, json={"text": "\n".join(lines)}, timeout=10)
         except Exception as e:
