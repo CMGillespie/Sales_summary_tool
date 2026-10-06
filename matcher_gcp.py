@@ -53,11 +53,11 @@ HS_BASE_URL      = "https://api.hubapi.com"
 GEMINI_URL       = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
 TARGET_REP       = None
-LOOKBACK_HOURS   = 4
+LOOKBACK_HOURS   = 12
 BACKFILL_DAYS    = 1
 IS_BACKFILL      = os.environ.get("IS_BACKFILL", "false").lower() == "true"
 
-MATCH_WINDOW_MINS  = 15
+MATCH_WINDOW_MINS  = 20
 HIGH_THRESHOLD     = 6
 MIN_DURATION_MINS  = 5
 HS_PORTAL_ID       = "5315820"
