@@ -996,7 +996,11 @@ def get_session_state(session_id, wordly_key):
         res = requests.get(
             f"{WORDLY_BASE_URL}/sessions/{session_id}",
             headers={"x-wordly-api-key": wordly_key}, timeout=10)
-        return res.json().get("state", "unknown") if res.status_code == 200 else f"error_{res.status_code}"
+        if res.status_code == 200:
+            return res.json().get("state", "unknown")
+        if res.status_code == 404:
+            return "ended"  # session exists in transcripts list, treat as complete
+        return f"error_{res.status_code}"
     except:
         return "exception"
 
