@@ -1026,8 +1026,8 @@ def pull_wordly_transcripts(wordly_key, lookback_hours=None, lookback_days=None)
             dur = duration_mins(t.get("startTime",""), t.get("endTime",""))
             if 0 <= dur < MIN_DURATION_MINS:
                 continue
-            if get_session_state(sid, wordly_key) != "ended":
-                continue
+            if not t.get("endTime"):
+                continue  # session still active — catch next run
             transcripts.append({
                 "transcript_id": t.get("transcriptId"),
                 "session_id":    sid,
