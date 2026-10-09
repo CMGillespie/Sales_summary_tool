@@ -1189,7 +1189,7 @@ def summarize_match(r, person_name, hs_key, gemini_key,
           + (f" | Deal: {deal_stage}" if deal_stage else ""))
 
     # Build filename base using company name
-    safe_company = safe_filename(company_name.replace(" ", "_"))[:30]
+    safe_company = safe_filename((company_name or "Unknown").replace(" ", "_"))[:30]
     base         = f"{date_str}_{time_str}_{safe_company}"
 
     # Drive folder structure — separate folders per output type
